@@ -33,6 +33,7 @@ pub struct ChannelState {
     pub deps: AgentDeps,
     pub conversation_logger: ConversationLogger,
     pub screenshot_dir: std::path::PathBuf,
+    pub logs_dir: std::path::PathBuf,
 }
 
 impl std::fmt::Debug for ChannelState {
@@ -82,6 +83,7 @@ impl Channel {
         response_tx: mpsc::Sender<OutboundResponse>,
         event_rx: broadcast::Receiver<ProcessEvent>,
         screenshot_dir: std::path::PathBuf,
+        logs_dir: std::path::PathBuf,
     ) -> (Self, mpsc::Sender<InboundMessage>) {
         let process_id = ProcessId::Channel(id.clone());
         let hook = SpacebotHook::new(deps.agent_id.clone(), process_id, ProcessType::Channel, deps.event_tx.clone());
@@ -109,6 +111,7 @@ impl Channel {
             deps: deps.clone(),
             conversation_logger,
             screenshot_dir,
+            logs_dir,
         };
 
         let self_tx = message_tx.clone();
@@ -640,6 +643,7 @@ pub async fn spawn_worker_from_state(
             browser_config.clone(),
             state.screenshot_dir.clone(),
             brave_search_key.clone(),
+            state.logs_dir.clone(),
         );
         // TODO: Store input_tx somewhere accessible for routing follow-ups
         worker
@@ -652,6 +656,7 @@ pub async fn spawn_worker_from_state(
             browser_config,
             state.screenshot_dir.clone(),
             brave_search_key,
+            state.logs_dir.clone(),
         )
     };
     

@@ -319,6 +319,11 @@ impl ResolvedAgentConfig {
             .unwrap_or_else(|| self.data_dir.join("screenshots"))
     }
 
+    /// Directory for worker execution logs written on failure.
+    pub fn logs_dir(&self) -> PathBuf {
+        self.data_dir.join("logs")
+    }
+
     /// Path to agent workspace skills directory.
     pub fn skills_dir(&self) -> PathBuf {
         self.workspace.join("skills")

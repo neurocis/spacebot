@@ -8,6 +8,7 @@ use crate::{WorkerId, ChannelId, ProcessId, ProcessType, AgentDeps};
 use crate::hooks::SpacebotHook;
 use rig::agent::AgentBuilder;
 use rig::completion::{CompletionModel, Prompt};
+use std::fmt::Write as _;
 use std::path::PathBuf;
 use tokio::sync::{mpsc, watch};
 use uuid::Uuid;
@@ -46,6 +47,8 @@ pub struct Worker {
     pub screenshot_dir: PathBuf,
     /// Brave Search API key for web search tool.
     pub brave_search_key: Option<String>,
+    /// Directory for writing execution logs on failure.
+    pub logs_dir: PathBuf,
     /// Status updates.
     pub status_tx: watch::Sender<String>,
     pub status_rx: watch::Receiver<String>,
@@ -61,6 +64,7 @@ impl Worker {
         browser_config: BrowserConfig,
         screenshot_dir: PathBuf,
         brave_search_key: Option<String>,
+        logs_dir: PathBuf,
     ) -> Self {
         let id = Uuid::new_v4();
         let process_id = ProcessId::Worker(id);
@@ -79,6 +83,7 @@ impl Worker {
             browser_config,
             screenshot_dir,
             brave_search_key,
+            logs_dir,
             status_tx,
             status_rx,
         }
@@ -93,6 +98,7 @@ impl Worker {
         browser_config: BrowserConfig,
         screenshot_dir: PathBuf,
         brave_search_key: Option<String>,
+        logs_dir: PathBuf,
     ) -> (Self, mpsc::Sender<String>) {
         let id = Uuid::new_v4();
         let process_id = ProcessId::Worker(id);
@@ -112,6 +118,7 @@ impl Worker {
             browser_config,
             screenshot_dir,
             brave_search_key,
+            logs_dir,
             status_tx,
             status_rx,
         };
@@ -216,12 +223,14 @@ impl Worker {
                 Err(rig::completion::PromptError::PromptCancelled { reason, .. }) => {
                     self.state = WorkerState::Failed;
                     self.hook.send_status("cancelled");
+                    self.write_failure_log(&history, &format!("cancelled: {reason}"));
                     tracing::info!(worker_id = %self.id, %reason, "worker cancelled");
                     return Ok(format!("Worker cancelled: {reason}"));
                 }
                 Err(error) => {
                     self.state = WorkerState::Failed;
                     self.hook.send_status("failed");
+                    self.write_failure_log(&history, &error.to_string());
                     tracing::error!(worker_id = %self.id, %error, "worker LLM call failed");
                     return Err(crate::error::AgentError::Other(error.into()).into());
                 }
@@ -250,6 +259,7 @@ impl Worker {
                         self.hook.send_status("waiting for input");
                     }
                     Err(error) => {
+                        self.write_failure_log(&history, &format!("follow-up failed: {error}"));
                         tracing::error!(worker_id = %self.id, %error, "worker follow-up failed");
                         self.state = WorkerState::Failed;
                         self.hook.send_status("failed");
@@ -314,6 +324,110 @@ impl Worker {
     /// Check if worker is interactive.
     pub fn is_interactive(&self) -> bool {
         self.input_rx.is_some()
+    }
+
+    /// Write a structured log file to disk capturing the worker's execution
+    /// trace (task, history, error). Called on failure so we have something
+    /// to inspect after the fact.
+    fn write_failure_log(&self, history: &[rig::message::Message], error: &str) {
+        let timestamp = chrono::Utc::now().format("%Y%m%d_%H%M%S");
+        let filename = format!("worker_{}_{}.log", self.id, timestamp);
+        let path = self.logs_dir.join(&filename);
+
+        let mut log = String::with_capacity(4096);
+
+        let _ = writeln!(log, "=== Worker Failure Log ===");
+        let _ = writeln!(log, "Worker ID: {}", self.id);
+        if let Some(channel_id) = &self.channel_id {
+            let _ = writeln!(log, "Channel ID: {channel_id}");
+        }
+        let _ = writeln!(log, "Timestamp: {}", chrono::Utc::now().to_rfc3339());
+        let _ = writeln!(log, "State: {:?}", self.state);
+        let _ = writeln!(log);
+        let _ = writeln!(log, "--- Task ---");
+        let _ = writeln!(log, "{}", self.task);
+        let _ = writeln!(log);
+        let _ = writeln!(log, "--- Error ---");
+        let _ = writeln!(log, "{error}");
+        let _ = writeln!(log);
+        let _ = writeln!(log, "--- History ({} messages) ---", history.len());
+
+        for (index, message) in history.iter().enumerate() {
+            let _ = writeln!(log);
+            match message {
+                rig::message::Message::User { content } => {
+                    let _ = writeln!(log, "[{index}] User:");
+                    for item in content.iter() {
+                        match item {
+                            rig::message::UserContent::Text(t) => {
+                                let _ = writeln!(log, "  {}", t.text);
+                            }
+                            rig::message::UserContent::ToolResult(tr) => {
+                                let call_id = tr.call_id.as_deref().unwrap_or("unknown");
+                                let _ = writeln!(log, "  Tool Result (id: {call_id}):");
+                                for c in tr.content.iter() {
+                                    if let rig::message::ToolResultContent::Text(t) = c {
+                                        let text = if t.text.len() > 2000 {
+                                            format!("{}...[truncated]", &t.text[..2000])
+                                        } else {
+                                            t.text.clone()
+                                        };
+                                        let _ = writeln!(log, "    {text}");
+                                    }
+                                }
+                            }
+                            _ => {
+                                let _ = writeln!(log, "  [non-text content]");
+                            }
+                        }
+                    }
+                }
+                rig::message::Message::Assistant { content, .. } => {
+                    let _ = writeln!(log, "[{index}] Assistant:");
+                    for item in content.iter() {
+                        match item {
+                            rig::message::AssistantContent::Text(t) => {
+                                let _ = writeln!(log, "  {}", t.text);
+                            }
+                            rig::message::AssistantContent::ToolCall(tc) => {
+                                let args = tc.function.arguments.to_string();
+                                let args_display = if args.len() > 500 {
+                                    format!("{}...[truncated]", &args[..500])
+                                } else {
+                                    args
+                                };
+                                let _ = writeln!(
+                                    log,
+                                    "  Tool Call: {} (id: {})\n    Args: {args_display}",
+                                    tc.function.name, tc.id
+                                );
+                            }
+                            _ => {
+                                let _ = writeln!(log, "  [other content]");
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Best-effort write — don't propagate errors from logging
+        if let Err(write_error) = std::fs::create_dir_all(&self.logs_dir)
+            .and_then(|()| std::fs::write(&path, &log))
+        {
+            tracing::warn!(
+                worker_id = %self.id,
+                path = %path.display(),
+                %write_error,
+                "failed to write worker failure log"
+            );
+        } else {
+            tracing::info!(
+                worker_id = %self.id,
+                path = %path.display(),
+                "worker failure log written"
+            );
+        }
     }
 }
 

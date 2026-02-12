@@ -100,6 +100,8 @@ async fn main() -> anyhow::Result<()> {
             .with_context(|| format!("failed to create archives dir: {}", agent_config.archives_dir.display()))?;
         std::fs::create_dir_all(&agent_config.ingest_dir())
             .with_context(|| format!("failed to create ingest dir: {}", agent_config.ingest_dir().display()))?;
+        std::fs::create_dir_all(&agent_config.logs_dir())
+            .with_context(|| format!("failed to create logs dir: {}", agent_config.logs_dir().display()))?;
 
         // Per-agent database connections
         let db = spacebot::db::Db::connect(&agent_config.data_dir)
@@ -282,6 +284,7 @@ async fn main() -> anyhow::Result<()> {
         let heartbeat_context = spacebot::heartbeat::HeartbeatContext {
             deps: agent.deps.clone(),
             screenshot_dir: agent.config.screenshot_dir(),
+            logs_dir: agent.config.logs_dir(),
             messaging_manager: messaging_manager.clone(),
             store: store.clone(),
         };
@@ -386,6 +389,7 @@ async fn main() -> anyhow::Result<()> {
                         response_tx,
                         event_rx,
                         agent.config.screenshot_dir(),
+                        agent.config.logs_dir(),
                     );
 
                     // Backfill recent message history from the platform

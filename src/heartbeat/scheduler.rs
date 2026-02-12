@@ -88,6 +88,7 @@ fn default_true() -> bool {
 pub struct HeartbeatContext {
     pub deps: AgentDeps,
     pub screenshot_dir: std::path::PathBuf,
+    pub logs_dir: std::path::PathBuf,
     pub messaging_manager: Arc<MessagingManager>,
     pub store: Arc<HeartbeatStore>,
 }
@@ -299,6 +300,7 @@ async fn run_heartbeat(heartbeat: &Heartbeat, context: &HeartbeatContext) -> Res
         response_tx,
         event_rx,
         context.screenshot_dir.clone(),
+        context.logs_dir.clone(),
     );
 
     // Spawn the channel's event loop
