@@ -116,7 +116,10 @@ impl Compactor {
         let channel_id = self.channel_id.clone();
         let deps = self.deps.clone();
         let logger = self.logger.clone();
-        let compactor_prompt = deps.runtime_config.prompts.load().compactor.clone();
+        let prompt_engine = deps.runtime_config.prompts.load();
+        let compactor_prompt = prompt_engine
+            .render_static("compactor")
+            .expect("failed to render compactor prompt");
 
         tokio::spawn(async move {
             let result = run_compaction(
@@ -170,10 +173,10 @@ impl Compactor {
         }
 
         // Insert a marker at the beginning
-        let marker = format!(
-            "[System: {remove_count} older messages were truncated due to context limits. \
-             Some conversation history has been lost.]"
-        );
+        let prompt_engine = self.deps.runtime_config.prompts.load();
+        let marker = prompt_engine
+            .render_system_truncation(remove_count)
+            .expect("failed to render truncation message");
         history.insert(0, Message::from(marker));
 
         tracing::warn!(

@@ -220,7 +220,14 @@ impl Channel {
 
         // Capture conversation context from the first message (platform, channel, server)
         if self.conversation_context.is_none() {
-            self.conversation_context = Some(build_conversation_context(&message));
+            let prompt_engine = self.deps.runtime_config.prompts.load();
+            let server_name = message.metadata.get("discord_guild_name").and_then(|v| v.as_str());
+            let channel_name = message.metadata.get("discord_channel_name").and_then(|v| v.as_str());
+            self.conversation_context = Some(
+                prompt_engine
+                    .render_conversation_context(&message.source, server_name, channel_name)
+                    .expect("failed to render conversation context"),
+            );
         }
 
         let system_prompt = self.build_system_prompt().await;
@@ -248,53 +255,39 @@ impl Channel {
         Ok(())
     }
 
-    /// Assemble the full system prompt from identity, memory, skills, and status.
+    /// Assemble the full system prompt using the PromptEngine.
     async fn build_system_prompt(&self) -> String {
         let rc = &self.deps.runtime_config;
+        let prompt_engine = rc.prompts.load();
+
         let identity_context = rc.identity.load().render();
-        let channel_prompt = rc.prompts.load().channel.clone();
-        let skills = rc.skills.load();
-
-        let mut prompt = String::new();
-
-        if !identity_context.is_empty() {
-            prompt.push_str(&identity_context);
-            prompt.push_str("\n\n");
-        }
-
         let memory_bulletin = rc.memory_bulletin.load();
-        if !memory_bulletin.is_empty() {
-            prompt.push_str("## Memory Context\n\n");
-            prompt.push_str(&memory_bulletin);
-            prompt.push_str("\n\n");
-        }
+        let skills = rc.skills.load();
+        let skills_prompt = skills.render_channel_prompt(&prompt_engine);
 
-        prompt.push_str(&channel_prompt);
-
-        let skills_prompt = skills.render_channel_prompt();
-        if !skills_prompt.is_empty() {
-            prompt.push_str("\n\n");
-            prompt.push_str(&skills_prompt);
-        }
-
-        prompt.push_str("\n\n");
-        prompt.push_str(&build_worker_capabilities(rc));
-
-        if let Some(context) = &self.conversation_context {
-            prompt.push_str("\n\n## Conversation Context\n\n");
-            prompt.push_str(context);
-        }
+        let browser_enabled = rc.browser_config.load().enabled;
+        let web_search_enabled = rc.brave_search_key.load().is_some();
+        let worker_capabilities = prompt_engine
+            .render_worker_capabilities(browser_enabled, web_search_enabled)
+            .expect("failed to render worker capabilities");
 
         let status_text = {
             let status = self.state.status_block.read().await;
             status.render()
         };
-        if !status_text.is_empty() {
-            prompt.push_str("\n\n## Current Status\n\n");
-            prompt.push_str(&status_text);
-        }
 
-        prompt
+        let empty_to_none = |s: String| if s.is_empty() { None } else { Some(s) };
+
+        prompt_engine
+            .render_channel_prompt(
+                empty_to_none(identity_context),
+                empty_to_none(memory_bulletin.to_string()),
+                empty_to_none(skills_prompt),
+                worker_capabilities,
+                self.conversation_context.clone(),
+                empty_to_none(status_text),
+            )
+            .expect("failed to render channel prompt")
     }
 
     /// Register per-turn tools, run the LLM agentic loop, and clean up.
@@ -471,15 +464,18 @@ impl Channel {
         // Re-trigger the channel LLM so it can process the result and respond
         if should_retrigger {
             if let Some(conversation_id) = &self.conversation_id {
+                let retrigger_message = self.deps.runtime_config
+                    .prompts.load()
+                    .render_system_retrigger()
+                    .expect("failed to render retrigger message");
+
                 let synthetic = InboundMessage {
                     id: uuid::Uuid::new_v4().to_string(),
                     source: "system".into(),
                     conversation_id: conversation_id.clone(),
                     sender_id: "system".into(),
                     agent_id: None,
-                    content: crate::MessageContent::Text(
-                        "[System: a background process has completed. Check your history and status block for the result, then respond to the user.]".into()
-                    ),
+                    content: crate::MessageContent::Text(retrigger_message),
                     timestamp: chrono::Utc::now(),
                     metadata: std::collections::HashMap::new(),
                 };
@@ -539,7 +535,10 @@ pub async fn spawn_branch_from_state(
     description: impl Into<String>,
 ) -> std::result::Result<BranchId, AgentError> {
     let description = description.into();
-    let system_prompt = state.deps.runtime_config.prompts.load().branch.clone();
+    let prompt_engine = state.deps.runtime_config.prompts.load();
+    let system_prompt = prompt_engine
+        .render_static("branch")
+        .expect("failed to render branch prompt");
 
     spawn_branch(state, &description, &description, &system_prompt, "thinking...")
         .await
@@ -554,12 +553,15 @@ async fn spawn_memory_persistence_branch(
     state: &ChannelState,
     deps: &AgentDeps,
 ) -> std::result::Result<BranchId, AgentError> {
-    let system_prompt = deps.runtime_config.prompts.load().memory_persistence.clone();
-    let prompt = "Review the recent conversation and persist any important information as memories. \
-                  Start by recalling existing memories related to the topics discussed, then save \
-                  new or updated memories with appropriate associations.";
+    let prompt_engine = deps.runtime_config.prompts.load();
+    let system_prompt = prompt_engine
+        .render_static("memory_persistence")
+        .expect("failed to render memory_persistence prompt");
+    let prompt = prompt_engine
+        .render_system_memory_persistence()
+        .expect("failed to render memory persistence prompt");
 
-    spawn_branch(state, "memory persistence", prompt, &system_prompt, "persisting memories...")
+    spawn_branch(state, "memory persistence", &prompt, &system_prompt, "persisting memories...")
         .await
 }
 
@@ -640,14 +642,17 @@ pub async fn spawn_worker_from_state(
     let task = task.into();
 
     let rc = &state.deps.runtime_config;
-    let worker_system_prompt = rc.prompts.load().worker.clone();
+    let prompt_engine = rc.prompts.load();
+    let worker_system_prompt = prompt_engine
+        .render_static("worker")
+        .expect("failed to render worker prompt");
     let skills = rc.skills.load();
     let browser_config = (**rc.browser_config.load()).clone();
     let brave_search_key = (**rc.brave_search_key.load()).clone();
 
     // Build the worker system prompt, optionally prepending skill instructions
     let system_prompt = if let Some(name) = skill_name {
-        if let Some(skill_prompt) = skills.render_worker_prompt(name) {
+        if let Some(skill_prompt) = skills.render_worker_prompt(name, &prompt_engine) {
             format!("{}\n\n{}", worker_system_prompt, skill_prompt)
         } else {
             tracing::warn!(skill = %name, "skill not found, spawning worker without skill context");
@@ -807,34 +812,6 @@ fn spawn_worker_task<F, E>(
     });
 }
 
-/// Build a dynamic description of worker tool capabilities based on runtime config.
-///
-/// The channel needs to know what its workers can do so it delegates correctly.
-/// Browser and web search availability depend on config, so this can't be static.
-fn build_worker_capabilities(rc: &crate::config::RuntimeConfig) -> String {
-    let browser_enabled = rc.browser_config.load().enabled;
-    let web_search_enabled = rc.brave_search_key.load().is_some();
-
-    let mut section = String::from("## Worker Capabilities\n\n");
-    section.push_str("When you spawn a worker, it has access to the following tools:\n\n");
-    section.push_str("- **shell** — run shell commands\n");
-    section.push_str("- **file** — read, write, search, and list files\n");
-    section.push_str("- **exec** — run subprocesses with environment control\n");
-    section.push_str("- **set_status** — update worker status visible in your status block\n");
-
-    if browser_enabled {
-        section.push_str("- **browser** — browse web pages, take screenshots, click elements, fill forms\n");
-    }
-
-    if web_search_enabled {
-        section.push_str("- **web_search** — search the web via Brave Search API\n");
-    }
-
-    section.push_str("\nWorkers do NOT have conversation context or memory access. Include all necessary context in the task description.");
-
-    section
-}
-
 /// Format a user message with sender attribution from message metadata.
 ///
 /// In multi-user channels, this lets the LLM distinguish who said what.
@@ -850,28 +827,6 @@ fn format_user_message(raw_text: &str, message: &InboundMessage) -> String {
         .unwrap_or(&message.sender_id);
 
     format!("[{display_name}]: {raw_text}")
-}
-
-/// Build conversation context string from the first message's metadata.
-///
-/// Injected into the system prompt so the LLM knows what platform and
-/// channel it's operating in.
-fn build_conversation_context(message: &InboundMessage) -> String {
-    let mut lines = Vec::new();
-
-    lines.push(format!("Platform: {}", message.source));
-
-    if let Some(guild_name) = message.metadata.get("discord_guild_name").and_then(|v| v.as_str()) {
-        lines.push(format!("Server: {guild_name}"));
-    }
-
-    if let Some(channel_name) = message.metadata.get("discord_channel_name").and_then(|v| v.as_str()) {
-        lines.push(format!("Channel: #{channel_name}"));
-    }
-
-    lines.push("Multiple users may be present. Each message is prefixed with [username].".into());
-
-    lines.join("\n")
 }
 
 /// Check if a ProcessEvent is targeted at a specific channel.

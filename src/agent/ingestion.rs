@@ -242,7 +242,10 @@ async fn process_chunk(
     total_chunks: usize,
     deps: &AgentDeps,
 ) -> anyhow::Result<()> {
-    let ingestion_prompt = deps.runtime_config.prompts.load().ingestion.clone();
+    let prompt_engine = deps.runtime_config.prompts.load();
+    let ingestion_prompt = prompt_engine
+        .render_static("ingestion")
+        .expect("failed to render ingestion prompt");
 
     let routing = deps.runtime_config.routing.load();
     let model_name = routing.resolve(ProcessType::Branch, None).to_string();
@@ -259,13 +262,9 @@ async fn process_chunk(
         .tool_server_handle(tool_server)
         .build();
 
-    let user_prompt = format!(
-        "## File: {filename} (chunk {chunk_number} of {total_chunks})\n\n\
-         Process the following text and extract any useful memories:\n\n\
-         ---\n\n\
-         {chunk}\n\n\
-         ---"
-    );
+    let user_prompt = prompt_engine
+        .render_system_ingestion_chunk(filename, chunk_number, total_chunks, chunk)
+        .expect("failed to render ingestion chunk prompt");
 
     let mut history = Vec::new();
     match agent.prompt(&user_prompt).with_history(&mut history).await {

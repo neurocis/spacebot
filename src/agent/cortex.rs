@@ -301,7 +301,10 @@ pub async fn generate_bulletin(deps: &AgentDeps) -> bool {
 
     // Phase 2: LLM synthesis of raw sections into a cohesive bulletin
     let cortex_config = **deps.runtime_config.cortex.load();
-    let bulletin_prompt = deps.runtime_config.prompts.load().cortex_bulletin.clone();
+    let prompt_engine = deps.runtime_config.prompts.load();
+    let bulletin_prompt = prompt_engine
+        .render_static("cortex_bulletin")
+        .expect("failed to render cortex bulletin prompt");
 
     let routing = deps.runtime_config.routing.load();
     let model_name = routing.resolve(ProcessType::Branch, None).to_string();
@@ -313,11 +316,9 @@ pub async fn generate_bulletin(deps: &AgentDeps) -> bool {
         .preamble(&bulletin_prompt)
         .build();
 
-    let synthesis_prompt = format!(
-        "Synthesize the following memory data into a concise briefing of {} words or fewer.\n\n\
-         ## Raw Memory Data\n\n{raw_sections}",
-        cortex_config.bulletin_max_words,
-    );
+    let synthesis_prompt = prompt_engine
+        .render_system_cortex_synthesis(cortex_config.bulletin_max_words, &raw_sections)
+        .expect("failed to render cortex synthesis prompt");
 
     match agent.prompt(&synthesis_prompt).await {
         Ok(bulletin) => {

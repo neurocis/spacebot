@@ -84,6 +84,9 @@ arrow-schema = "57.3.0"
 chromiumoxide = { version = "0.8", features = ["tokio-runtime"], default-features = false }
 chromiumoxide_cdp = "0.8"
 
+# Templating for prompts
+minijinja = "2.8"
+
 [lints.clippy]
 dbg_macro = "forbid"
 todo = "forbid"

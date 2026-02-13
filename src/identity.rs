@@ -2,4 +2,4 @@
 
 pub mod files;
 
-pub use files::{Identity, Prompts, scaffold_default_prompts, scaffold_identity_files};
+pub use files::{Identity, scaffold_identity_files};

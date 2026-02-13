@@ -12,6 +12,7 @@ pub mod llm;
 pub mod memory;
 pub mod messaging;
 pub mod opencode;
+pub mod prompts;
 pub mod secrets;
 pub mod settings;
 pub mod skills;

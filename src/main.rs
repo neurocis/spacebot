@@ -83,11 +83,9 @@ async fn main() -> anyhow::Result<()> {
     // Collected for the file watcher: (agent_id, workspace, runtime_config)
     let mut watcher_agents: Vec<(String, std::path::PathBuf, Arc<spacebot::config::RuntimeConfig>)> = Vec::new();
 
-    let shared_prompts_dir = config.prompts_dir();
-
-    spacebot::identity::scaffold_default_prompts(&shared_prompts_dir)
-        .await
-        .with_context(|| "failed to scaffold default prompts")?;
+    // Create the PromptEngine with bundled templates (no file watching, no user overrides)
+    let prompt_engine = spacebot::prompts::PromptEngine::new("en")
+        .with_context(|| "failed to initialize prompt engine")?;
 
     for agent_config in &resolved_agents {
         tracing::info!(agent_id = %agent_config.id, "initializing agent");
@@ -137,12 +135,6 @@ async fn main() -> anyhow::Result<()> {
             .with_context(|| format!("failed to scaffold identity files for agent '{}'", agent_config.id))?;
         let identity = spacebot::identity::Identity::load(&agent_config.workspace).await;
 
-        // Load prompts (agent overrides, then shared)
-        let prompts = spacebot::identity::Prompts::load(
-            &agent_config.workspace,
-            &shared_prompts_dir,
-        ).await.with_context(|| format!("failed to load prompts for agent '{}'", agent_config.id))?;
-
         // Load skills (instance-level, then workspace overrides)
         let skills = spacebot::skills::SkillSet::load(
             &config.skills_dir(),
@@ -153,7 +145,7 @@ async fn main() -> anyhow::Result<()> {
         let runtime_config = Arc::new(spacebot::config::RuntimeConfig::new(
             agent_config,
             &config.defaults,
-            prompts,
+            prompt_engine.clone(),
             identity,
             skills,
         ));

@@ -299,10 +299,11 @@ impl Worker {
                             );
                             self.hook.send_status("compacting (overflow recovery)");
                             self.force_compact_history(&mut history).await;
-                            follow_up_prompt = format!(
-                                "{follow_up}\n\n[System: Previous attempt exceeded context limit. \
-                                 Older history has been compacted.]"
-                            );
+                            let prompt_engine = self.deps.runtime_config.prompts.load();
+                            let overflow_msg = prompt_engine
+                                .render_system_worker_overflow()
+                                .expect("failed to render worker overflow message");
+                            follow_up_prompt = format!("{follow_up}\n\n{overflow_msg}");
                         }
                         Err(error) => {
                             self.write_failure_log(&history, &format!("follow-up failed: {error}"));
@@ -376,10 +377,10 @@ impl Worker {
         let removed: Vec<rig::message::Message> = history.drain(..remove_count).collect();
 
         let recap = build_worker_recap(&removed);
-        let marker = format!(
-            "[System: Earlier work has been summarized to free up context. \
-             {remove_count} messages compacted.]\n\n## Work completed so far:\n{recap}"
-        );
+        let prompt_engine = self.deps.runtime_config.prompts.load();
+        let marker = prompt_engine
+            .render_system_worker_compact(remove_count, &recap)
+            .expect("failed to render worker compact message");
         history.insert(0, rig::message::Message::from(marker));
 
         tracing::info!(

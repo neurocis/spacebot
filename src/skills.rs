@@ -109,56 +109,44 @@ impl SkillSet {
     ///
     /// The channel sees skill names and descriptions but is instructed to
     /// delegate actual skill execution to workers.
-    pub fn render_channel_prompt(&self) -> String {
+    pub fn render_channel_prompt(&self, prompt_engine: &crate::prompts::PromptEngine) -> String {
         if self.skills.is_empty() {
             return String::new();
         }
 
-        let mut output = String::from("## Available Skills\n\n");
-        output.push_str(
-            "You have access to the following skills. Skills contain specialized instructions \
-             for specific tasks. When a user's request matches a skill, spawn a worker to handle \
-             it and include the skill name in the task description so the worker knows which \
-             skill to follow.\n\n"
-        );
-        output.push_str(
-            "To use a skill, spawn a worker with a task like: \
-             \"Use the [skill-name] skill to [task]. Read the skill instructions at [path] first.\"\n\n"
-        );
-        output.push_str("<available_skills>\n");
-
         let mut sorted_skills: Vec<&Skill> = self.skills.values().collect();
         sorted_skills.sort_by(|a, b| a.name.cmp(&b.name));
 
-        for skill in sorted_skills {
-            output.push_str(&format!(
-                "  <skill>\n    <name>{}</name>\n    <description>{}</description>\n    <location>{}</location>\n  </skill>\n",
-                skill.name,
-                skill.description,
-                skill.file_path.display(),
-            ));
-        }
+        let skill_infos: Vec<crate::prompts::SkillInfo> = sorted_skills
+            .into_iter()
+            .map(|s| crate::prompts::SkillInfo {
+                name: s.name.clone(),
+                description: s.description.clone(),
+                location: s.file_path.display().to_string(),
+            })
+            .collect();
 
-        output.push_str("</available_skills>\n");
-        output
+        prompt_engine
+            .render_skills_channel(skill_infos)
+            .expect("failed to render skills channel prompt")
     }
 
     /// Render the skills section for injection into a worker system prompt.
     ///
     /// Workers get the full skill content so they can follow the instructions
     /// directly without needing to read the file.
-    pub fn render_worker_prompt(&self, skill_name: &str) -> Option<String> {
+    pub fn render_worker_prompt(
+        &self,
+        skill_name: &str,
+        prompt_engine: &crate::prompts::PromptEngine,
+    ) -> Option<String> {
         let skill = self.get(skill_name)?;
 
-        let mut output = String::from("## Skill Instructions\n\n");
-        output.push_str(&format!(
-            "You are executing the **{}** skill. Follow these instructions:\n\n",
-            skill.name
-        ));
-        output.push_str(&skill.content);
-        output.push('\n');
-
-        Some(output)
+        Some(
+            prompt_engine
+                .render_skills_worker(&skill.name, &skill.content)
+                .expect("failed to render skills worker prompt"),
+        )
     }
 }
 
@@ -371,7 +359,8 @@ mod tests {
     #[test]
     fn test_skill_set_channel_prompt_empty() {
         let set = SkillSet::default();
-        assert!(set.render_channel_prompt().is_empty());
+        let engine = crate::prompts::PromptEngine::new("en").unwrap();
+        assert!(set.render_channel_prompt(&engine).is_empty());
     }
 
     #[test]
@@ -386,11 +375,11 @@ mod tests {
             source: SkillSource::Instance,
         });
 
-        let prompt = set.render_channel_prompt();
+        let engine = crate::prompts::PromptEngine::new("en").unwrap();
+        let prompt = set.render_channel_prompt(&engine);
         assert!(prompt.contains("<available_skills>"));
         assert!(prompt.contains("<name>weather</name>"));
         assert!(prompt.contains("<description>Get weather forecasts</description>"));
-        assert!(prompt.contains("spawn a worker"));
     }
 
     #[test]
@@ -405,12 +394,13 @@ mod tests {
             source: SkillSource::Instance,
         });
 
-        let prompt = set.render_worker_prompt("weather").unwrap();
+        let engine = crate::prompts::PromptEngine::new("en").unwrap();
+        let prompt = set.render_worker_prompt("weather", &engine).unwrap();
         assert!(prompt.contains("## Skill Instructions"));
         assert!(prompt.contains("**weather**"));
         assert!(prompt.contains("# Weather"));
         assert!(prompt.contains("Use curl."));
 
-        assert!(set.render_worker_prompt("nonexistent").is_none());
+        assert!(set.render_worker_prompt("nonexistent", &engine).is_none());
     }
 }

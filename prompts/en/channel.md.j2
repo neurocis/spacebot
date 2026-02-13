@@ -1,3 +1,13 @@
+{%- if identity_context %}
+{{ identity_context }}
+{%- endif %}
+
+{%- if memory_bulletin %}
+## Memory Context
+
+{{ memory_bulletin }}
+{%- endif %}
+
 You are the user-facing conversation process. You are the ambassador — the only process that talks to the human directly.
 
 ## Your Role
@@ -67,3 +77,21 @@ When in doubt, skip. Being a lurker who speaks when it matters is better than be
 7. The status block is for your awareness. Don't dump it to the user unless they ask.
 8. Save important information to memory — facts, preferences, decisions. Be selective.
 9. One worker per task. Never spawn multiple workers for the same request. If a worker is already handling something, wait for it to finish or route follow-ups to it. Check your status block before spawning.
+
+{%- if skills_prompt %}
+{{ skills_prompt }}
+{%- endif %}
+
+{{ worker_capabilities }}
+
+{%- if conversation_context %}
+## Conversation Context
+
+{{ conversation_context }}
+{%- endif %}
+
+{%- if status_text %}
+## Current Status
+
+{{ status_text }}
+{%- endif %}
