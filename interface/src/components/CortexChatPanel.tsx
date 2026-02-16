@@ -2,6 +2,8 @@ import { useEffect, useRef, useState } from "react";
 import { useCortexChat, type ToolActivity } from "@/hooks/useCortexChat";
 import { Markdown } from "@/components/Markdown";
 import { Button } from "@/ui";
+import { PlusSignIcon, Cancel01Icon } from "@hugeicons/core-free-icons";
+import { HugeiconsIcon } from "@hugeicons/react";
 
 interface CortexChatPanelProps {
 	agentId: string;
@@ -81,9 +83,7 @@ export function CortexChatPanel({ agentId, channelId, onClose }: CortexChatPanel
 						className="h-7 w-7"
 						title="New chat"
 					>
-						<svg className="h-3.5 w-3.5" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5">
-							<path d="M8 3v10M3 8h10" />
-						</svg>
+						<HugeiconsIcon icon={PlusSignIcon} className="h-3.5 w-3.5" />
 					</Button>
 					{onClose && (
 						<Button
@@ -93,9 +93,7 @@ export function CortexChatPanel({ agentId, channelId, onClose }: CortexChatPanel
 							className="h-7 w-7"
 							title="Close"
 						>
-							<svg className="h-3.5 w-3.5" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5">
-								<path d="M4 4l8 8M12 4l-8 8" />
-							</svg>
+							<HugeiconsIcon icon={Cancel01Icon} className="h-3.5 w-3.5" />
 						</Button>
 					)}
 				</div>

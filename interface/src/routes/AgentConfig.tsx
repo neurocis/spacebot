@@ -1,7 +1,9 @@
 import { useCallback, useEffect, useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { api, type AgentConfigResponse, type AgentConfigUpdateRequest } from "@/api/client";
-import { Button } from "@/ui";
+import { Button, SettingSidebarButton } from "@/ui";
+import { PlusSignIcon, MinusSignIcon } from "@hugeicons/core-free-icons";
+import { HugeiconsIcon } from "@hugeicons/react";
 
 type SectionId = "soul" | "identity" | "user" | "routing" | "tuning" | "compaction" | "cortex" | "coalesce" | "memory" | "browser" | "discord";
 
@@ -107,44 +109,42 @@ export function AgentConfig({ agentId }: AgentConfigProps) {
 				<div className="px-3 pb-1 pt-4">
 					<span className="text-tiny font-medium uppercase tracking-wider text-ink-faint">Identity</span>
 				</div>
-				<div className="flex flex-col gap-0.5 px-2">
-				{SECTIONS.filter((s) => s.group === "identity").map((section) => {
-					const isActive = activeSection === section.id;
-					const hasContent = !!getIdentityField(identityQuery.data ?? { soul: null, identity: null, user: null }, section.id)?.trim();
-					return (
-						<Button
-							key={section.id}
-							onClick={() => setActiveSection(section.id)}
-							variant={isActive ? "secondary" : "ghost"}
-							className={`justify-start ${isActive ? "bg-app-darkBox text-ink" : "text-ink-dull hover:text-ink"}`}
-						>
-							<span className="flex-1">{section.label}</span>
-							{!hasContent && (
-								<span className="rounded bg-amber-500/10 px-1 py-0.5 text-tiny text-amber-400/70">empty</span>
-							)}
-						</Button>
-					);
-				})}
+					<div className="flex flex-col gap-0.5 px-2">
+					{SECTIONS.filter((s) => s.group === "identity").map((section) => {
+						const isActive = activeSection === section.id;
+						const hasContent = !!getIdentityField(identityQuery.data ?? { soul: null, identity: null, user: null }, section.id)?.trim();
+						return (
+							<SettingSidebarButton
+								key={section.id}
+								onClick={() => setActiveSection(section.id)}
+								active={isActive}
+							>
+								<span className="flex-1">{section.label}</span>
+								{!hasContent && (
+									<span className="rounded bg-amber-500/10 px-1 py-0.5 text-tiny text-amber-400/70">empty</span>
+								)}
+							</SettingSidebarButton>
+						);
+					})}
 				</div>
 
 				{/* Config Group */}
 				<div className="px-3 pb-1 pt-4 mt-2">
 					<span className="text-tiny font-medium uppercase tracking-wider text-ink-faint">Configuration</span>
 				</div>
-				<div className="flex flex-col gap-0.5 px-2">
-				{SECTIONS.filter((s) => s.group === "config").map((section) => {
-					const isActive = activeSection === section.id;
-					return (
-						<Button
-							key={section.id}
-							onClick={() => setActiveSection(section.id)}
-							variant={isActive ? "secondary" : "ghost"}
-							className={`justify-start ${isActive ? "bg-app-darkBox text-ink" : "text-ink-dull hover:text-ink"}`}
-						>
-							<span className="flex-1">{section.label}</span>
-						</Button>
-					);
-				})}
+					<div className="flex flex-col gap-0.5 px-2">
+					{SECTIONS.filter((s) => s.group === "config").map((section) => {
+						const isActive = activeSection === section.id;
+						return (
+							<SettingSidebarButton
+								key={section.id}
+								onClick={() => setActiveSection(section.id)}
+								active={isActive}
+							>
+								<span className="flex-1">{section.label}</span>
+							</SettingSidebarButton>
+						);
+					})}
 				</div>
 			</div>
 
@@ -785,9 +785,7 @@ function ConfigNumberField({ label, description, value, onChange, min, max, step
 					size="icon"
 					className="h-8 w-8 rounded-none"
 				>
-					<svg className="h-3 w-3" viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round">
-						<path d="M2.5 6h7" />
-					</svg>
+					<HugeiconsIcon icon={MinusSignIcon} className="h-3 w-3" />
 				</Button>
 				<input
 					type="text"
@@ -803,9 +801,7 @@ function ConfigNumberField({ label, description, value, onChange, min, max, step
 					size="icon"
 					className="h-8 w-8 rounded-none"
 				>
-					<svg className="h-3 w-3" viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round">
-						<path d="M6 2.5v7M2.5 6h7" />
-					</svg>
+					<HugeiconsIcon icon={PlusSignIcon} className="h-3 w-3" />
 				</Button>
 			</div>
 				{suffix && <span className="text-tiny text-ink-faint">{suffix}</span>}
@@ -858,9 +854,7 @@ function ConfigFloatField({ label, description, value, onChange, min = 0, max = 
 					size="icon"
 					className="h-8 w-8 rounded-none"
 				>
-					<svg className="h-3 w-3" viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round">
-						<path d="M2.5 6h7" />
-					</svg>
+					<HugeiconsIcon icon={MinusSignIcon} className="h-3 w-3" />
 				</Button>
 				<input
 					type="text"
@@ -876,9 +870,7 @@ function ConfigFloatField({ label, description, value, onChange, min = 0, max = 
 					size="icon"
 					className="h-8 w-8 rounded-none"
 				>
-					<svg className="h-3 w-3" viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round">
-						<path d="M6 2.5v7M2.5 6h7" />
-					</svg>
+					<HugeiconsIcon icon={PlusSignIcon} className="h-3 w-3" />
 				</Button>
 			</div>
 				{/* Progress bar */}

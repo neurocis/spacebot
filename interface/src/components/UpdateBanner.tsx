@@ -2,6 +2,8 @@ import { useState } from "react";
 import { useQuery, useMutation } from "@tanstack/react-query";
 import { api } from "@/api/client";
 import { Banner, BannerActions, Button } from "@/ui";
+import { Cancel01Icon } from "@hugeicons/core-free-icons";
+import { HugeiconsIcon } from "@hugeicons/react";
 
 export function UpdateBanner() {
 	const [dismissed, setDismissed] = useState(false);
@@ -71,9 +73,7 @@ export function UpdateBanner() {
 						size="icon"
 						className="h-7 w-7"
 					>
-						<svg width="14" height="14" viewBox="0 0 14 14" fill="none">
-							<path d="M3.5 3.5l7 7M10.5 3.5l-7 7" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
-						</svg>
+						<HugeiconsIcon icon={Cancel01Icon} size={14} />
 					</Button>
 				</BannerActions>
 			</Banner>

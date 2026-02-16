@@ -1,7 +1,7 @@
 import * as React from "react";
-import { cva, type VariantProps } from "class-variance-authority";
-import { cx } from "./utils";
-import { Loader } from "./Loader";
+import {cva, type VariantProps} from "class-variance-authority";
+import {cx} from "./utils";
+import {Loader} from "./Loader";
 
 export const buttonStyles = cva(
 	[
@@ -15,47 +15,34 @@ export const buttonStyles = cva(
 				default: "h-9 px-4 py-2 text-sm",
 				sm: "h-8 rounded-md px-3 text-xs",
 				lg: "h-10 rounded-md px-8 text-sm",
-				icon: "h-9 w-9",
+				icon: "h-8 w-8 rounded-md p-0",
 			},
 			variant: {
-				default: [
-					"bg-accent text-white shadow",
-					"hover:bg-accent/90",
-				],
-				destructive: [
-					"bg-red-600 text-white shadow-sm",
-					"hover:bg-red-700",
-				],
+				default: ["bg-accent text-white shadow", "hover:bg-accent/90"],
+				destructive: ["bg-red-600 text-white shadow-sm", "hover:bg-red-700"],
 				outline: [
 					"border border-app-line bg-transparent",
-					"hover:bg-app-darkBox hover:text-ink",
+					"hover:bg-app-hover/40 hover:text-ink",
 				],
 				secondary: [
 					"bg-app-darkBox text-ink-dull",
 					"hover:bg-app-lightBox hover:text-ink",
 				],
-				ghost: [
-					"hover:bg-app-darkBox hover:text-ink-dull",
-					"text-ink-faint",
-				],
-				link: [
-					"text-accent underline-offset-4",
-					"hover:underline",
-				],
+				ghost: ["hover:bg-app-darkBox hover:text-ink-dull", "text-ink-faint"],
+				link: ["text-accent underline-offset-4", "hover:underline"],
 			},
 		},
 		defaultVariants: {
 			variant: "default",
 			size: "default",
 		},
-	}
+	},
 );
 
 export type ButtonBaseProps = VariantProps<typeof buttonStyles>;
 
 export interface ButtonProps
-	extends React.ButtonHTMLAttributes<HTMLButtonElement>,
-		ButtonBaseProps {
+	extends React.ButtonHTMLAttributes<HTMLButtonElement>, ButtonBaseProps {
 	loading?: boolean;
 	leftIcon?: React.ReactNode;
 	rightIcon?: React.ReactNode;
@@ -75,20 +62,18 @@ export const Button = React.forwardRef<HTMLButtonElement, ButtonProps>(
 			disabled,
 			...props
 		},
-		ref
+		ref,
 	) => {
 		const isDisabled = disabled || loading;
 
 		return (
 			<button
-				className={cx(buttonStyles({ variant, size }), className)}
+				className={cx(buttonStyles({variant, size}), className)}
 				ref={ref}
 				disabled={isDisabled}
 				{...props}
 			>
-				{loading && (
-					<Loader className="mr-2 h-4 w-4 animate-spin" />
-				)}
+				{loading && <Loader className="mr-2 h-4 w-4 animate-spin" />}
 				{!loading && leftIcon && (
 					<span className="mr-2 inline-flex items-center">{leftIcon}</span>
 				)}
@@ -98,7 +83,7 @@ export const Button = React.forwardRef<HTMLButtonElement, ButtonProps>(
 				)}
 			</button>
 		);
-	}
+	},
 );
 
 Button.displayName = "Button";

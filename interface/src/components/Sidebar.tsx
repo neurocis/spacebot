@@ -5,6 +5,8 @@ import { motion } from "framer-motion";
 import { api, type ChannelInfo } from "@/api/client";
 import type { ChannelLiveState } from "@/hooks/useChannelLiveState";
 import { Button } from "@/ui";
+import { ArrowLeft01Icon, DashboardSquare01Icon, LeftToRightListBulletIcon, Settings01Icon } from "@hugeicons/core-free-icons";
+import { HugeiconsIcon } from "@hugeicons/react";
 
 interface SidebarProps {
 	liveStates: Record<string, ChannelLiveState>;
@@ -70,9 +72,7 @@ export function Sidebar({ liveStates, collapsed, onToggle }: SidebarProps) {
 						size="icon"
 						className="h-6 w-6 text-sidebar-inkFaint hover:bg-sidebar-selected/50 hover:text-sidebar-inkDull"
 					>
-						<svg className="h-4 w-4" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5">
-							<path d="M10 3L5 8l5 5" />
-						</svg>
+						<HugeiconsIcon icon={ArrowLeft01Icon} className="h-4 w-4" />
 					</Button>
 				</div>
 			)}
@@ -86,21 +86,17 @@ export function Sidebar({ liveStates, collapsed, onToggle }: SidebarProps) {
 						className={`flex h-8 w-8 items-center justify-center rounded-md ${
 							isOverview ? "bg-sidebar-selected text-sidebar-ink" : "text-sidebar-inkDull hover:bg-sidebar-selected/50"
 						}`}
-						title="Dashboard"
-					>
-						<svg className="h-4 w-4" viewBox="0 0 16 16" fill="currentColor">
-							<path d="M2 2h5v5H2V2zm7 0h5v5H9V2zm-7 7h5v5H2V9zm7 0h5v5H9V9z" />
-						</svg>
-					</Link>
+					title="Dashboard"
+				>
+					<HugeiconsIcon icon={DashboardSquare01Icon} className="h-4 w-4" />
+				</Link>
 				<Link
 					to="/logs"
 					className="flex h-8 w-8 items-center justify-center rounded-md text-sidebar-inkDull hover:bg-sidebar-selected/50 [&.active]:bg-sidebar-selected [&.active]:text-sidebar-ink"
 					activeProps={{ className: "active" }}
 					title="Logs"
 				>
-					<svg className="h-4 w-4" viewBox="0 0 16 16" fill="currentColor">
-						<path d="M2 3h12v1.5H2V3zm0 3.5h12V8H2V6.5zm0 3.5h8V11.5H2V10z" />
-					</svg>
+					<HugeiconsIcon icon={LeftToRightListBulletIcon} className="h-4 w-4" />
 				</Link>
 				<Link
 					to="/settings"
@@ -109,9 +105,7 @@ export function Sidebar({ liveStates, collapsed, onToggle }: SidebarProps) {
 					}`}
 					title="Settings"
 				>
-					<svg className="h-4 w-4" viewBox="0 0 16 16" fill="currentColor">
-						<path d="M6.5 1h3l.4 2.1c.3.1.6.3.9.5L12.9 3l1.5 2.6-1.7 1.4c0 .3.1.7.1 1s0 .7-.1 1l1.7 1.4-1.5 2.6-2.1-.7c-.3.2-.6.4-.9.5L9.5 15h-3l-.4-2.1c-.3-.1-.6-.3-.9-.5L3.1 13l-1.5-2.6 1.7-1.4c0-.3-.1-.7-.1-1s0-.7.1-1L1.6 5.6 3.1 3l2.1.7c.3-.2.6-.4.9-.5L6.5 1zM8 5.5a2.5 2.5 0 100 5 2.5 2.5 0 000-5z" />
-					</svg>
+					<HugeiconsIcon icon={Settings01Icon} className="h-4 w-4" />
 				</Link>
 				<div className="my-1 h-px w-5 bg-sidebar-line" />
 					{agents.map((agent) => {

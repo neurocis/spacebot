@@ -16,6 +16,8 @@ import {
 } from "@/ui";
 import { platformColor } from "@/lib/format";
 import type { ChannelLiveState } from "@/hooks/useChannelLiveState";
+import { Search01Icon, PlusSignIcon } from "@hugeicons/core-free-icons";
+import { HugeiconsIcon } from "@hugeicons/react";
 
 interface AgentChannelsProps {
 	agentId: string;
@@ -204,23 +206,14 @@ export function AgentChannels({ agentId, liveStates }: AgentChannelsProps) {
 		<div className="flex h-full flex-col">
 			<div className="flex items-center gap-3 border-b border-app-line/50 bg-app-darkBox/20 px-6 py-3">
 				<div className="relative flex-1">
-					<input
-						type="text"
-						placeholder="Search channels..."
-						value={searchQuery}
-						onChange={(event) => setSearchQuery(event.target.value)}
-						className="w-full rounded-md border border-app-line bg-app-darkBox px-3 py-1.5 pl-8 text-sm text-ink placeholder:text-ink-faint focus:border-accent/50 focus:outline-none"
-					/>
-					<svg
-						className="absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-ink-faint"
-						viewBox="0 0 16 16"
-						fill="none"
-						stroke="currentColor"
-						strokeWidth="1.5"
-					>
-						<circle cx="6.5" cy="6.5" r="5" />
-						<path d="M10.5 10.5L14 14" />
-					</svg>
+				<input
+					type="text"
+					placeholder="Search channels..."
+					value={searchQuery}
+					onChange={(event) => setSearchQuery(event.target.value)}
+					className="w-full rounded-md border border-app-line bg-app-darkBox px-3 py-1.5 pl-8 text-sm text-ink placeholder:text-ink-faint focus:border-accent/50 focus:outline-none"
+				/>
+				<HugeiconsIcon icon={Search01Icon} className="absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-ink-faint" />
 				</div>
 			</div>
 			<div className="flex-1 overflow-y-auto p-6">
@@ -246,17 +239,9 @@ export function AgentChannels({ agentId, liveStates }: AgentChannelsProps) {
 							size="lg"
 							className="flex min-h-[100px] flex-col items-center justify-center gap-2 rounded-lg border-2 border-dashed border-app-line/60 bg-transparent hover:border-accent/50 hover:bg-app-darkBox/30"
 						>
-							<div className="flex h-8 w-8 items-center justify-center rounded-full border border-app-line/80 text-ink-faint">
-								<svg
-									viewBox="0 0 16 16"
-									fill="none"
-									stroke="currentColor"
-									strokeWidth="1.5"
-									className="h-4 w-4"
-								>
-									<path d="M8 3v10M3 8h10" />
-								</svg>
-							</div>
+						<div className="flex h-8 w-8 items-center justify-center rounded-full border border-app-line/80 text-ink-faint">
+							<HugeiconsIcon icon={PlusSignIcon} className="h-4 w-4" />
+						</div>
 							<span className="text-sm text-ink-faint">Connect Channel</span>
 						</Button>
 					</div>

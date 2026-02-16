@@ -630,6 +630,7 @@ export interface ProviderStatus {
 	anthropic: boolean;
 	openai: boolean;
 	openrouter: boolean;
+	zhipu: boolean;
 }
 
 export interface ProvidersResponse {

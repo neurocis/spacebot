@@ -19,4 +19,6 @@ export * from "./RadioGroup";
 export * from "./Popover";
 export * from "./Slider";
 export * from "./ProgressBar";
+export * from "./SettingSidebarButton";
+export * from "./ToggleGroup";
 export * as Forms from "./forms";

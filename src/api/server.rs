@@ -1992,6 +1992,7 @@ struct ProviderStatus {
     anthropic: bool,
     openai: bool,
     openrouter: bool,
+    zhipu: bool,
 }
 
 #[derive(Serialize)]
@@ -2018,7 +2019,7 @@ async fn get_providers(
     let config_path = state.config_path.read().await.clone();
 
     // Check which providers have keys by reading the config
-    let (anthropic, openai, openrouter) = if config_path.exists() {
+    let (anthropic, openai, openrouter, zhipu) = if config_path.exists() {
         let content = tokio::fs::read_to_string(&config_path)
             .await
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
@@ -2047,6 +2048,7 @@ async fn get_providers(
             has_key("anthropic_key", "ANTHROPIC_API_KEY"),
             has_key("openai_key", "OPENAI_API_KEY"),
             has_key("openrouter_key", "OPENROUTER_API_KEY"),
+            has_key("zhipu_key", "ZHIPU_API_KEY"),
         )
     } else {
         // No config file — check env vars only
@@ -2054,6 +2056,7 @@ async fn get_providers(
             std::env::var("ANTHROPIC_API_KEY").is_ok(),
             std::env::var("OPENAI_API_KEY").is_ok(),
             std::env::var("OPENROUTER_API_KEY").is_ok(),
+            std::env::var("ZHIPU_API_KEY").is_ok(),
         )
     };
 
@@ -2061,8 +2064,9 @@ async fn get_providers(
         anthropic,
         openai,
         openrouter,
+        zhipu,
     };
-    let has_any = providers.anthropic || providers.openai || providers.openrouter;
+    let has_any = providers.anthropic || providers.openai || providers.openrouter || providers.zhipu;
 
     Ok(Json(ProvidersResponse { providers, has_any }))
 }
@@ -2075,6 +2079,7 @@ async fn update_provider(
         "anthropic" => "anthropic_key",
         "openai" => "openai_key",
         "openrouter" => "openrouter_key",
+        "zhipu" => "zhipu_key",
         _ => {
             return Ok(Json(ProviderUpdateResponse {
                 success: false,
@@ -2138,6 +2143,7 @@ async fn delete_provider(
         "anthropic" => "anthropic_key",
         "openai" => "openai_key",
         "openrouter" => "openrouter_key",
+        "zhipu" => "zhipu_key",
         _ => {
             return Ok(Json(ProviderUpdateResponse {
                 success: false,

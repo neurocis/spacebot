@@ -2,7 +2,8 @@
 
 import * as React from "react";
 import * as CheckboxPrimitive from "@radix-ui/react-checkbox";
-import { Check, Minus } from "@phosphor-icons/react";
+import { Tick02Icon, MinusSignIcon } from "@hugeicons/core-free-icons";
+import { HugeiconsIcon } from "@hugeicons/react";
 import { cva, type VariantProps } from "class-variance-authority";
 import { cx } from "./utils";
 
@@ -40,9 +41,9 @@ export const Checkbox = React.forwardRef<
       className={cx(indicatorStyles())}
     >
       {indeterminate ? (
-        <Minus className="h-3 w-3 text-white" weight="bold" />
+        <HugeiconsIcon icon={MinusSignIcon} className="h-3 w-3 text-white" />
       ) : (
-        <Check className="h-3 w-3 text-white" weight="bold" />
+        <HugeiconsIcon icon={Tick02Icon} className="h-3 w-3 text-white" />
       )}
     </CheckboxPrimitive.Indicator>
   </CheckboxPrimitive.Root>

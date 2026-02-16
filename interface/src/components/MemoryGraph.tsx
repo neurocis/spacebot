@@ -14,6 +14,8 @@ import {
 } from "@/api/client";
 import { formatTimeAgo } from "@/lib/format";
 import { Button } from "@/ui";
+import { Target02Icon, PlusSignIcon, MinusSignIcon, RefreshIcon, Cancel01Icon } from "@hugeicons/core-free-icons";
+import { HugeiconsIcon } from "@hugeicons/react";
 
 // -- Constants --
 
@@ -384,69 +386,58 @@ export function MemoryGraph({ agentId, sort, typeFilter }: MemoryGraphProps) {
 
 			{/* Controls */}
 			<div className="absolute right-4 top-4 z-10 flex flex-col gap-1.5">
-				<Button
-					onClick={() => sigmaRef.current?.getCamera().animatedReset()}
-					variant="ghost"
-					size="icon"
-					className="h-8 w-8 bg-app-darkBox/80 backdrop-blur-sm"
-					title="Reset zoom"
-				>
-					<svg className="h-4 w-4" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5">
-						<rect x="2" y="2" width="12" height="12" rx="1" />
-						<circle cx="8" cy="8" r="2" />
-					</svg>
-				</Button>
-				<Button
-					onClick={() => {
-						const camera = sigmaRef.current?.getCamera();
-						if (camera) camera.animatedZoom({ duration: 200 });
-					}}
-					variant="ghost"
-					size="icon"
-					className="h-8 w-8 bg-app-darkBox/80 backdrop-blur-sm"
-					title="Zoom in"
-				>
-					<svg className="h-4 w-4" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5">
-						<line x1="8" y1="4" x2="8" y2="12" />
-						<line x1="4" y1="8" x2="12" y2="8" />
-					</svg>
-				</Button>
-				<Button
-					onClick={() => {
-						const camera = sigmaRef.current?.getCamera();
-						if (camera) camera.animatedUnzoom({ duration: 200 });
-					}}
-					variant="ghost"
-					size="icon"
-					className="h-8 w-8 bg-app-darkBox/80 backdrop-blur-sm"
-					title="Zoom out"
-				>
-					<svg className="h-4 w-4" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5">
-						<line x1="4" y1="8" x2="12" y2="8" />
-					</svg>
-				</Button>
-				<Button
-					onClick={() => {
-						const layout = layoutRef.current;
-						if (layout) {
-							if (layout.isRunning()) {
-								layout.stop();
-							} else {
-								layout.start();
-								setTimeout(() => { if (layout.isRunning()) layout.stop(); }, 3000);
-							}
+			<Button
+				onClick={() => sigmaRef.current?.getCamera().animatedReset()}
+				variant="ghost"
+				size="icon"
+				className="h-8 w-8 bg-app-darkBox/80 backdrop-blur-sm"
+				title="Reset zoom"
+			>
+				<HugeiconsIcon icon={Target02Icon} className="h-4 w-4" />
+			</Button>
+			<Button
+				onClick={() => {
+					const camera = sigmaRef.current?.getCamera();
+					if (camera) camera.animatedZoom({ duration: 200 });
+				}}
+				variant="ghost"
+				size="icon"
+				className="h-8 w-8 bg-app-darkBox/80 backdrop-blur-sm"
+				title="Zoom in"
+			>
+				<HugeiconsIcon icon={PlusSignIcon} className="h-4 w-4" />
+			</Button>
+			<Button
+				onClick={() => {
+					const camera = sigmaRef.current?.getCamera();
+					if (camera) camera.animatedUnzoom({ duration: 200 });
+				}}
+				variant="ghost"
+				size="icon"
+				className="h-8 w-8 bg-app-darkBox/80 backdrop-blur-sm"
+				title="Zoom out"
+			>
+				<HugeiconsIcon icon={MinusSignIcon} className="h-4 w-4" />
+			</Button>
+			<Button
+				onClick={() => {
+					const layout = layoutRef.current;
+					if (layout) {
+						if (layout.isRunning()) {
+							layout.stop();
+						} else {
+							layout.start();
+							setTimeout(() => { if (layout.isRunning()) layout.stop(); }, 3000);
 						}
-					}}
-					variant="ghost"
-					size="icon"
-					className="h-8 w-8 bg-app-darkBox/80 backdrop-blur-sm"
-					title="Re-run layout"
-				>
-					<svg className="h-4 w-4" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5">
-						<path d="M2 8a6 6 0 0 1 10.47-4M14 8a6 6 0 0 1-10.47 4" />
-						<path d="M12 1v3h3M4 15v-3H1" />
-					</svg>
-				</Button>
+					}
+				}}
+				variant="ghost"
+				size="icon"
+				className="h-8 w-8 bg-app-darkBox/80 backdrop-blur-sm"
+				title="Re-run layout"
+			>
+				<HugeiconsIcon icon={RefreshIcon} className="h-4 w-4" />
+			</Button>
 			</div>
 
 			{/* Node detail panel */}
@@ -469,16 +460,14 @@ export function MemoryGraph({ agentId, sort, typeFilter }: MemoryGraphProps) {
 							>
 								{selectedNode.memory.memory_type}
 							</span>
-							<Button
-								onClick={() => setSelectedNode(null)}
-								variant="ghost"
-								size="icon"
-								className="h-7 w-7"
-							>
-								<svg className="h-3.5 w-3.5" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="2">
-									<path d="M4 4l8 8M12 4l-8 8" />
-								</svg>
-							</Button>
+						<Button
+							onClick={() => setSelectedNode(null)}
+							variant="ghost"
+							size="icon"
+							className="h-7 w-7"
+						>
+							<HugeiconsIcon icon={Cancel01Icon} className="h-3.5 w-3.5" />
+						</Button>
 						</div>
 						<p className="mb-3 max-h-32 overflow-y-auto whitespace-pre-wrap text-sm leading-relaxed text-ink-dull">
 							{selectedNode.memory.content}

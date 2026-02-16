@@ -98,14 +98,16 @@ Per-agent token usage and cost tracking with budget enforcement. Session, daily,
 ### Additional Channel Adapters
 
 - **Email** — IMAP polling for inbound, SMTP for outbound. Each email thread maps to a conversation.
-- **Matrix** — decentralized chat protocol support. Bridges to self-hosted Matrix/Element deployments.
+- **WhatsApp** — Meta Cloud API. Hosted instances receive webhooks via the platform proxy. Self-hosted users point the callback URL at their own reverse proxy or Tailscale funnel.
+- **Matrix** — decentralized chat protocol. Bridges to self-hosted Matrix/Element deployments.
+- **iMessage** — macOS-only, AppleScript bridge. Personal use on self-hosted Mac instances.
+- **IRC** — TLS socket connection. Lightweight protocol, maps channels to conversations.
+- **Lark** — Feishu/Lark webhook integration for enterprise teams.
+- **DingTalk** — webhook integration for Chinese enterprise teams.
 
 ### Onboarding CLI
 
-Interactive setup wizard for self-hosted instances.
-
-- `spacebot setup` — walks through API key config, provider selection, first agent creation, channel connection
-- `spacebot setup --quick --provider openrouter --key sk-...` — non-interactive fast path
+- `spacebot setup --quick --provider openrouter --key sk-...` — non-interactive fast path for scripted deploys
 - `spacebot setup --channels-only` — add channels to an existing instance
 
 ## Decided Against

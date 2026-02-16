@@ -2128,8 +2128,9 @@ pub fn spawn_file_watcher(
 
 /// Interactive first-run onboarding. Creates ~/.spacebot with a minimal config.
 ///
-/// Returns the path to the newly created config file on success.
-pub fn run_onboarding() -> anyhow::Result<PathBuf> {
+/// Returns `Some(path)` if the CLI wizard created a config file, or `None` if
+/// the user chose to set up via the embedded UI (setup mode).
+pub fn run_onboarding() -> anyhow::Result<Option<PathBuf>> {
     use dialoguer::{Input, Password, Select};
     use std::io::Write;
 
@@ -2138,6 +2139,23 @@ pub fn run_onboarding() -> anyhow::Result<PathBuf> {
     println!("  -------------------");
     println!();
     println!("  No configuration found. Let's set things up.");
+    println!();
+
+    let setup_method = Select::new()
+        .with_prompt("How do you want to set up?")
+        .items(&["Set up here (CLI)", "Set up in the browser (localhost)"])
+        .default(0)
+        .interact()?;
+
+    if setup_method == 1 {
+        println!();
+        println!("  Starting in setup mode. Open the UI to finish configuration:");
+        println!();
+        println!("    http://localhost:19898");
+        println!();
+        return Ok(None);
+    }
+
     println!();
 
     // 1. Pick a provider
@@ -2309,5 +2327,5 @@ pub fn run_onboarding() -> anyhow::Result<PathBuf> {
     );
     println!();
 
-    Ok(config_path)
+    Ok(Some(config_path))
 }

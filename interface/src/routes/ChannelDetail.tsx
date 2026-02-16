@@ -8,6 +8,8 @@ import { LiveDuration } from "@/components/LiveDuration";
 import { Markdown } from "@/components/Markdown";
 import { formatTimestamp, platformIcon, platformColor } from "@/lib/format";
 import { Button } from "@/ui";
+import { Cancel01Icon, IdeaIcon } from "@hugeicons/core-free-icons";
+import { HugeiconsIcon } from "@hugeicons/react";
 
 interface ChannelDetailProps {
 	agentId: string;
@@ -33,9 +35,7 @@ function CancelButton({ onClick }: { onClick: () => void }) {
 			className="ml-auto h-7 w-7 flex-shrink-0 text-ink-faint/50 hover:bg-red-500/15 hover:text-red-400"
 			title="Cancel"
 		>
-			<svg className="h-3.5 w-3.5" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="2">
-				<path d="M4 4l8 8M12 4l-8 8" />
-			</svg>
+			<HugeiconsIcon icon={Cancel01Icon} className="h-3.5 w-3.5" />
 		</Button>
 	);
 }
@@ -303,18 +303,15 @@ export function ChannelDetail({ agentId, channelId, channel, liveState, onLoadMo
 								<span className="ml-1 text-tiny text-ink-faint">typing</span>
 							</div>
 						)}
-						<Button
-							onClick={() => setCortexOpen(!cortexOpen)}
-							variant={cortexOpen ? "secondary" : "ghost"}
-							size="icon"
-							className={`h-8 w-8 ${cortexOpen ? "bg-violet-500/20 text-violet-400" : ""}`}
-							title="Toggle cortex chat"
-						>
-							<svg className="h-4 w-4" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5">
-								<circle cx="8" cy="8" r="3" />
-								<path d="M8 1v2M8 13v2M1 8h2M13 8h2M3.05 3.05l1.41 1.41M11.54 11.54l1.41 1.41M3.05 12.95l1.41-1.41M11.54 4.46l1.41-1.41" />
-							</svg>
-				</Button>
+					<Button
+						onClick={() => setCortexOpen(!cortexOpen)}
+						variant={cortexOpen ? "secondary" : "ghost"}
+						size="icon"
+						className={`h-8 w-8 ${cortexOpen ? "bg-violet-500/20 text-violet-400" : ""}`}
+						title="Toggle cortex chat"
+					>
+						<HugeiconsIcon icon={IdeaIcon} className="h-4 w-4" />
+					</Button>
 					</div>
 				</div>
 

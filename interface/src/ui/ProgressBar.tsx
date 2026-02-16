@@ -3,6 +3,8 @@
 import * as React from "react";
 import { cva, type VariantProps } from "class-variance-authority";
 import { cx } from "./utils";
+import { Tick02Icon } from "@hugeicons/core-free-icons";
+import { HugeiconsIcon } from "@hugeicons/react";
 
 const progressBarStyles = cva(
   "relative h-2 w-full overflow-hidden rounded-full bg-app-button",
@@ -227,19 +229,7 @@ export const ProgressSteps: React.FC<ProgressStepsProps> = ({
               )}
             >
               {status === "completed" ? (
-                <svg
-                  className="h-4 w-4"
-                  fill="none"
-                  viewBox="0 0 24 24"
-                  stroke="currentColor"
-                >
-                  <path
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                    strokeWidth={2}
-                    d="M5 13l4 4L19 7"
-                  />
-                </svg>
+                <HugeiconsIcon icon={Tick02Icon} className="h-4 w-4" />
               ) : (
                 index + 1
               )}

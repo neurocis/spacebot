@@ -9,6 +9,8 @@ import {
 } from "@/api/client";
 import { CortexChatPanel } from "@/components/CortexChatPanel";
 import { formatTimeAgo } from "@/lib/format";
+import { IdeaIcon } from "@hugeicons/core-free-icons";
+import { HugeiconsIcon } from "@hugeicons/react";
 
 const PAGE_SIZE = 50;
 
@@ -179,10 +181,7 @@ export function AgentCortex({ agentId }: AgentCortexProps) {
 							}`}
 							title="Toggle cortex chat"
 						>
-							<svg className="h-4 w-4" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5">
-								<circle cx="8" cy="8" r="3" />
-								<path d="M8 1v2M8 13v2M1 8h2M13 8h2M3.05 3.05l1.41 1.41M11.54 11.54l1.41 1.41M3.05 12.95l1.41-1.41M11.54 4.46l1.41-1.41" />
-							</svg>
+							<HugeiconsIcon icon={IdeaIcon} className="h-4 w-4" />
 						</button>
 					</div>
 				</div>

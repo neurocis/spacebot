@@ -84,9 +84,9 @@ fn cmd_start(
     let resolved_config_path = if config_path.is_some() {
         config_path.clone()
     } else if spacebot::config::Config::needs_onboarding() {
-        let path = spacebot::config::run_onboarding()
-            .with_context(|| "onboarding failed")?;
-        Some(path)
+        // Returns Some(path) if CLI wizard ran, None if user chose the UI.
+        spacebot::config::run_onboarding()
+            .with_context(|| "onboarding failed")?
     } else {
         None
     };

@@ -2,7 +2,8 @@
 
 import * as React from "react";
 import * as RadioGroupPrimitive from "@radix-ui/react-radio-group";
-import { Circle } from "@phosphor-icons/react";
+import { CircleIcon } from "@hugeicons/core-free-icons";
+import { HugeiconsIcon } from "@hugeicons/react";
 import { cva, type VariantProps } from "class-variance-authority";
 import { cx } from "./utils";
 
@@ -53,7 +54,7 @@ export const RadioGroupItem = React.forwardRef<
       {...props}
     >
       <RadioGroupPrimitive.Indicator className={cx(radioIndicatorStyles())}>
-        <Circle className="h-2 w-2 fill-current text-current" weight="fill" />
+        <HugeiconsIcon icon={CircleIcon} className="h-2 w-2 fill-current text-current" fill="currentColor" />
       </RadioGroupPrimitive.Indicator>
     </RadioGroupPrimitive.Item>
   );

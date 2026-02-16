@@ -17,8 +17,11 @@ import {
 	DropdownMenuContent,
 	DropdownMenuItem,
 	DropdownMenuTrigger,
+	ToggleGroup,
 } from "@/ui";
 import { formatTimeAgo } from "@/lib/format";
+import { Search01Icon, ArrowDown01Icon, LeftToRightListBulletIcon, WorkflowSquare01Icon, IdeaIcon } from "@hugeicons/core-free-icons";
+import { HugeiconsIcon } from "@hugeicons/react";
 
 type ViewMode = "list" | "graph";
 
@@ -144,39 +147,28 @@ export function AgentMemories({ agentId }: AgentMemoriesProps) {
 			<div className="flex items-center gap-3 border-b border-app-line/50 bg-app-darkBox/20 px-6 py-3">
 				{/* Search */}
 				<div className="relative flex-1">
-					<input
-						type="text"
-						placeholder="Search memories..."
-						value={searchQuery}
-						onChange={(event) => setSearchQuery(event.target.value)}
-						className="w-full rounded-md border border-app-line bg-app-darkBox px-3 py-1.5 pl-8 text-sm text-ink placeholder:text-ink-faint focus:border-accent/50 focus:outline-none"
-					/>
-					<svg
-						className="absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-ink-faint"
-						viewBox="0 0 16 16"
-						fill="none"
-						stroke="currentColor"
-						strokeWidth="1.5"
-					>
-						<circle cx="6.5" cy="6.5" r="5" />
-						<path d="M10.5 10.5L14 14" />
-					</svg>
+				<input
+					type="text"
+					placeholder="Search memories..."
+					value={searchQuery}
+					onChange={(event) => setSearchQuery(event.target.value)}
+					className="w-full rounded-md border border-app-line bg-app-darkBox px-3 py-1.5 pl-8 text-sm text-ink placeholder:text-ink-faint focus:border-accent/50 focus:outline-none"
+				/>
+				<HugeiconsIcon icon={Search01Icon} className="absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-ink-faint" />
 				</div>
 
 				{/* Sort dropdown */}
 				<DropdownMenu>
-					<DropdownMenuTrigger className="flex items-center gap-1.5 rounded-md border border-app-line bg-app-darkBox px-2.5 py-1.5 text-sm text-ink-dull transition-colors hover:border-app-line/80 hover:text-ink">
-						{SORT_OPTIONS.find((o) => o.value === sort)?.label ?? sort}
-						<svg className="h-3 w-3 text-ink-faint" viewBox="0 0 12 12" fill="currentColor">
-							<path d="M3 4.5l3 3 3-3" />
-						</svg>
-					</DropdownMenuTrigger>
+				<DropdownMenuTrigger className="flex items-center gap-1.5 rounded-md border border-app-line bg-app-darkBox px-2.5 py-1.5 text-sm text-ink-dull transition-colors hover:bg-app-selected hover:text-ink data-[state=open]:bg-app-selected data-[state=open]:text-ink">
+					{SORT_OPTIONS.find((o) => o.value === sort)?.label ?? sort}
+					<HugeiconsIcon icon={ArrowDown01Icon} className="h-3 w-3 text-ink-faint" />
+				</DropdownMenuTrigger>
 					<DropdownMenuContent align="end">
 						{SORT_OPTIONS.map((option) => (
 							<DropdownMenuItem
 								key={option.value}
 								onClick={() => setSort(option.value)}
-								className={option.value === sort ? "bg-accent/10 text-ink" : ""}
+								className={option.value === sort ? "bg-app-hover text-ink !bg-app-hover" : ""}
 							>
 								{option.label}
 							</DropdownMenuItem>
@@ -185,51 +177,27 @@ export function AgentMemories({ agentId }: AgentMemoriesProps) {
 				</DropdownMenu>
 
 			{/* View mode toggle */}
-			<div className="flex rounded-md border border-app-line bg-app-darkBox">
-				<Button
-					onClick={() => setViewMode("list")}
-					variant={viewMode === "list" ? "secondary" : "ghost"}
-					size="icon"
-					className={`rounded-l-md rounded-r-none ${viewMode === "list" ? "bg-accent/15 text-accent" : ""}`}
-					title="List view"
-				>
-					<svg className="h-3.5 w-3.5" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5">
-						<line x1="2" y1="4" x2="14" y2="4" />
-						<line x1="2" y1="8" x2="14" y2="8" />
-						<line x1="2" y1="12" x2="14" y2="12" />
-					</svg>
-				</Button>
-				<Button
-					onClick={() => setViewMode("graph")}
-					variant={viewMode === "graph" ? "secondary" : "ghost"}
-					size="icon"
-					className={`rounded-l-none rounded-r-md ${viewMode === "graph" ? "bg-accent/15 text-accent" : ""}`}
-					title="Graph view"
-				>
-					<svg className="h-3.5 w-3.5" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5">
-						<circle cx="4" cy="4" r="2" />
-						<circle cx="12" cy="4" r="2" />
-						<circle cx="8" cy="12" r="2" />
-						<line x1="5.5" y1="5.2" x2="7" y2="10.5" />
-						<line x1="10.5" y1="5.2" x2="9" y2="10.5" />
-						<line x1="6" y1="4" x2="10" y2="4" />
-					</svg>
-				</Button>
-			</div>
+			<ToggleGroup
+				value={viewMode}
+				onChange={setViewMode}
+				options={[
+					{ value: "list", label: <HugeiconsIcon icon={LeftToRightListBulletIcon} className="h-3.5 w-3.5" />, title: "List view" },
+					{ value: "graph", label: <HugeiconsIcon icon={WorkflowSquare01Icon} className="h-3.5 w-3.5" />, title: "Graph view" },
+				]}
+			/>
 
 			{/* Cortex chat toggle */}
-			<Button
-				onClick={() => setChatOpen(!chatOpen)}
-				variant={chatOpen ? "secondary" : "ghost"}
-				size="icon"
-				className={chatOpen ? "bg-violet-500/20 text-violet-400" : ""}
-				title="Toggle cortex chat"
-			>
-				<svg className="h-4 w-4" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5">
-					<circle cx="8" cy="8" r="3" />
-					<path d="M8 1v2M8 13v2M1 8h2M13 8h2M3.05 3.05l1.41 1.41M11.54 11.54l1.41 1.41M3.05 12.95l1.41-1.41M11.54 4.46l1.41-1.41" />
-				</svg>
-			</Button>
+			<div className="flex overflow-hidden rounded-md border border-app-line bg-app-darkBox">
+				<Button
+					onClick={() => setChatOpen(!chatOpen)}
+					variant={chatOpen ? "secondary" : "ghost"}
+					size="icon"
+					className={chatOpen ? "bg-app-selected text-ink" : ""}
+					title="Toggle cortex chat"
+				>
+					<HugeiconsIcon icon={IdeaIcon} className="h-4 w-4" />
+				</Button>
+			</div>
 			</div>
 
 			{/* Type filter pills */}
@@ -238,7 +206,7 @@ export function AgentMemories({ agentId }: AgentMemoriesProps) {
 					onClick={() => setTypeFilter(null)}
 					variant={typeFilter === null ? "secondary" : "ghost"}
 					size="sm"
-					className={`h-6 px-2 text-tiny ${typeFilter === null ? "bg-accent/15 text-accent" : ""}`}
+					className="h-6 px-2 text-tiny"
 				>
 					All
 				</Button>
