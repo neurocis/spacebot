@@ -269,6 +269,9 @@ impl CompletionModel for SpacebotModel {
         {
             let elapsed = start.elapsed().as_secs_f64();
             let metrics = crate::telemetry::Metrics::global();
+            // TODO: agent_id and tier are "unknown" because SpacebotModel doesn't
+            // carry process context. Thread agent_id/ProcessType through to get
+            // per-agent, per-tier breakdowns.
             metrics
                 .llm_requests_total
                 .with_label_values(&["unknown", &self.full_model_name, "unknown"])

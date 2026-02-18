@@ -85,6 +85,10 @@ impl SpacebotHook {
     }
 }
 
+// Timer map for tool call duration measurement. Entries are inserted in
+// on_tool_call and removed in on_tool_result. If the agent terminates between
+// the two hooks (e.g. leak detection), orphaned entries stay in the map.
+// Bounded by concurrent tool calls so not a practical leak.
 #[cfg(feature = "metrics")]
 static TOOL_CALL_TIMERS: std::sync::LazyLock<
     std::sync::Mutex<std::collections::HashMap<String, std::time::Instant>>,

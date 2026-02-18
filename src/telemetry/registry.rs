@@ -48,6 +48,8 @@ pub struct Metrics {
 
     /// Total memory entries per agent.
     /// Label: agent_id.
+    // TODO: Not wired to any call site. Needs periodic store queries or
+    // inc/dec in MemoryStore::save()/delete() to reflect actual counts.
     pub memory_entry_count: IntGaugeVec,
 }
 
@@ -84,6 +86,9 @@ impl Metrics {
                 "spacebot_llm_request_duration_seconds",
                 "LLM request duration in seconds",
             )
+            // TODO: Max bucket 10s is too low for LLM requests. Completions with
+            // retries and fallback chains routinely take 15-60s. Add upper buckets
+            // (e.g. 15, 30, 60, 120) so p99 latency doesn't collapse into +Inf.
             .buckets(vec![0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0]),
             &["agent_id", "model", "tier"],
         )
