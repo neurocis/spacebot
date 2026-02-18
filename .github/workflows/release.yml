@@ -19,7 +19,7 @@ jobs:
     strategy:
       matrix:
         include:
-          - runner: ubuntu-latest
+          - runner: ubuntu-24.04
             platform: linux/amd64
           - runner: ubuntu-24.04-arm
             platform: linux/arm64
@@ -83,7 +83,7 @@ jobs:
 
   merge:
     needs: build
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       contents: write
       packages: write
