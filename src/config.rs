@@ -4,7 +4,7 @@ use crate::error::{ConfigError, Result};
 use crate::llm::routing::RoutingConfig;
 use anyhow::Context as _;
 use arc_swap::ArcSwap;
-use serde::Deserialize;
+use serde::{Deserialize, Deserializer};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -168,6 +168,10 @@ impl LlmConfig {
             || !self.providers.is_empty()
     }
 }
+
+const ANTHROPIC_PROVIDER_BASE_URL: &str = "https://api.anthropic.com";
+const OPENAI_PROVIDER_BASE_URL: &str = "https://api.openai.com";
+const OPENROUTER_PROVIDER_BASE_URL: &str = "https://openrouter.ai/api";
 
 /// Defaults inherited by all agents. Individual agents can override any field.
 #[derive(Debug, Clone)]
@@ -1004,7 +1008,7 @@ struct TomlProviderConfig {
 }
 
 #[derive(Deserialize, Default)]
-struct TomlLlmConfig {
+struct TomlLlmConfigFields {
     anthropic_key: Option<String>,
     openai_key: Option<String>,
     openrouter_key: Option<String>,
@@ -1021,6 +1025,72 @@ struct TomlLlmConfig {
     nvidia_key: Option<String>,
     #[serde(default)]
     providers: HashMap<String, TomlProviderConfig>,
+    #[serde(default)]
+    #[serde(flatten)]
+    extra: HashMap<String, toml::Value>,
+}
+
+#[derive(Default)]
+struct TomlLlmConfig {
+    anthropic_key: Option<String>,
+    openai_key: Option<String>,
+    openrouter_key: Option<String>,
+    zhipu_key: Option<String>,
+    groq_key: Option<String>,
+    together_key: Option<String>,
+    fireworks_key: Option<String>,
+    deepseek_key: Option<String>,
+    xai_key: Option<String>,
+    mistral_key: Option<String>,
+    opencode_zen_key: Option<String>,
+    providers: HashMap<String, TomlProviderConfig>,
+}
+
+impl<'de> Deserialize<'de> for TomlLlmConfig {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let mut fields = TomlLlmConfigFields::deserialize(deserializer)?;
+        let mut providers = fields.providers;
+
+        for (key, value) in fields.extra {
+            if key == "provider" {
+                let table = value
+                    .as_table()
+                    .ok_or_else(|| serde::de::Error::custom("`llm.provider` must be a table"))?;
+                for (provider_id, provider_value) in table {
+                    let provider_config = provider_value
+                        .clone()
+                        .try_into()
+                        .map_err(serde::de::Error::custom)?;
+                    providers.insert(provider_id.to_string(), provider_config);
+                }
+            }
+
+            if let Some(provider_id) = key.strip_prefix("provider.") {
+                let provider_config = value.try_into().map_err(serde::de::Error::custom)?;
+                providers.insert(provider_id.to_string(), provider_config);
+            }
+        }
+
+        fields.providers = providers;
+
+        Ok(Self {
+            anthropic_key: fields.anthropic_key,
+            openai_key: fields.openai_key,
+            openrouter_key: fields.openrouter_key,
+            zhipu_key: fields.zhipu_key,
+            groq_key: fields.groq_key,
+            together_key: fields.together_key,
+            fireworks_key: fields.fireworks_key,
+            deepseek_key: fields.deepseek_key,
+            xai_key: fields.xai_key,
+            mistral_key: fields.mistral_key,
+            opencode_zen_key: fields.opencode_zen_key,
+            providers: fields.providers,
+        })
+    }
 }
 
 #[derive(Deserialize, Default)]
@@ -1313,14 +1383,15 @@ impl Config {
             })
     }
 
-    /// Check whether a first-run onboarding is needed (no config file and no env keys).
+    /// Check whether a first-run onboarding is needed (no config file and no env keys/providers).
     pub fn needs_onboarding() -> bool {
         let instance_dir = Self::default_instance_dir();
         let config_path = instance_dir.join("config.toml");
         if config_path.exists() {
             return false;
         }
-        // No config file — check if env vars can bootstrap
+        
+        // Check if we have any legacy env keys or providers configured
         std::env::var("ANTHROPIC_API_KEY").is_err()
             && std::env::var("OPENAI_API_KEY").is_err()
             && std::env::var("OPENROUTER_API_KEY").is_err()
@@ -1359,7 +1430,7 @@ impl Config {
 
     /// Load from environment variables only (no config file).
     pub fn load_from_env(instance_dir: &Path) -> Result<Self> {
-        let llm = LlmConfig {
+        let mut llm = LlmConfig {
             anthropic_key: std::env::var("ANTHROPIC_API_KEY").ok(),
             openai_key: std::env::var("OPENAI_API_KEY").ok(),
             openrouter_key: std::env::var("OPENROUTER_API_KEY").ok(),
@@ -1374,12 +1445,45 @@ impl Config {
             ollama_base_url: std::env::var("OLLAMA_BASE_URL").ok(),
             opencode_zen_key: std::env::var("OPENCODE_ZEN_API_KEY").ok(),
             nvidia_key: std::env::var("NVIDIA_API_KEY").ok(),
-            nvidia_key: std::env::var("NVIDIA_API_KEY").ok(),
             providers: HashMap::new(),
         };
 
-        // Note: We allow boot without provider configuration now. System starts in setup mode.
-        // Agents are initialized later when providers are added via API.
+        // Populate providers from env vars (same as from_toml does)
+        if let Some(anthropic_key) = llm.anthropic_key.clone() {
+            llm.providers
+                .entry("anthropic".to_string())
+                .or_insert_with(|| ProviderConfig {
+                    api_type: ApiType::Anthropic,
+                    base_url: ANTHROPIC_PROVIDER_BASE_URL.to_string(),
+                    api_key: anthropic_key,
+                    name: None,
+                });
+        }
+
+        if let Some(openai_key) = llm.openai_key.clone() {
+            llm.providers
+                .entry("openai".to_string())
+                .or_insert_with(|| ProviderConfig {
+                    api_type: ApiType::OpenAiCompletions,
+                    base_url: OPENAI_PROVIDER_BASE_URL.to_string(),
+                    api_key: openai_key,
+                    name: None,
+                });
+        }
+
+        if let Some(openrouter_key) = llm.openrouter_key.clone() {
+            llm.providers
+                .entry("openrouter".to_string())
+                .or_insert_with(|| ProviderConfig {
+                    api_type: ApiType::OpenAiCompletions,
+                    base_url: OPENROUTER_PROVIDER_BASE_URL.to_string(),
+                    api_key: openrouter_key,
+                    name: None,
+                });
+        }
+
+        // Note: We allow boot without provider keys now. System starts in setup mode.
+        // Agents are initialized later when keys are added via API.
 
         // Env-only routing: check for env overrides on channel/worker models
         let mut routing = RoutingConfig::default();
@@ -1441,7 +1545,7 @@ impl Config {
     }
 
     fn from_toml(toml: TomlConfig, instance_dir: PathBuf) -> Result<Self> {
-        let llm = LlmConfig {
+        let mut llm = LlmConfig {
             anthropic_key: toml
                 .llm
                 .anthropic_key
@@ -1526,28 +1630,60 @@ impl Config {
                 .as_deref()
                 .and_then(resolve_env_value)
                 .or_else(|| std::env::var("NVIDIA_API_KEY").ok()),
-            nvidia_key: toml
+            providers: toml
                 .llm
-                .nvidia_key
-                .as_deref()
-                .and_then(resolve_env_value)
-                .or_else(|| std::env::var("NVIDIA_API_KEY").ok()),
-            providers: toml.llm.providers.into_iter().map(|(name, config)| {
-                (
-                    name,
-                    ProviderConfig {
-                        api_type: config.api_type,
-                        base_url: config.base_url,
-                        api_key: resolve_env_value(&config.api_key)
-                            .expect("Failed to resolve API key for provider"),
-                        name: config.name,
-                    },
-                )
-            }).collect(),
+                .providers
+                .into_iter()
+                .map(|(provider_id, config)| {
+                    (
+                        provider_id.to_lowercase(),
+                        ProviderConfig {
+                            api_type: config.api_type,
+                            base_url: config.base_url,
+                            api_key: resolve_env_value(&config.api_key)
+                                .expect("Failed to resolve API key for provider"),
+                            name: config.name,
+                        },
+                    )
+                })
+                .collect(),
         };
 
-        // Note: We allow boot without provider configuration now. System starts in setup mode.
-        // Agents are initialized later when providers are added via API.
+        if let Some(anthropic_key) = llm.anthropic_key.clone() {
+            llm.providers
+                .entry("anthropic".to_string())
+                .or_insert_with(|| ProviderConfig {
+                    api_type: ApiType::Anthropic,
+                    base_url: ANTHROPIC_PROVIDER_BASE_URL.to_string(),
+                    api_key: anthropic_key,
+                    name: None,
+                });
+        }
+
+        if let Some(openai_key) = llm.openai_key.clone() {
+            llm.providers
+                .entry("openai".to_string())
+                .or_insert_with(|| ProviderConfig {
+                    api_type: ApiType::OpenAiCompletions,
+                    base_url: OPENAI_PROVIDER_BASE_URL.to_string(),
+                    api_key: openai_key,
+                    name: None,
+                });
+        }
+
+        if let Some(openrouter_key) = llm.openrouter_key.clone() {
+            llm.providers
+                .entry("openrouter".to_string())
+                .or_insert_with(|| ProviderConfig {
+                    api_type: ApiType::OpenAiCompletions,
+                    base_url: OPENROUTER_PROVIDER_BASE_URL.to_string(),
+                    api_key: openrouter_key,
+                    name: None,
+                });
+        }
+
+        // Note: We allow boot without provider keys now. System starts in setup mode.
+        // Agents are initialized later when keys are added via API.
 
         let base_defaults = DefaultsConfig::default();
         let defaults = DefaultsConfig {
@@ -2802,5 +2938,116 @@ api_key = "sk-proj-xyz789"
         assert_eq!(config.base_url, "https://api.openai.com/v1");
         assert_eq!(config.api_key, "sk-proj-xyz789");
         assert_eq!(config.name, None);
+    }
+
+    #[test]
+    fn test_llm_provider_tables_parse_with_env_and_lowercase_keys() {
+        let toml = r#"
+[llm.provider.MyProv]
+api_type = "openai_responses"
+base_url = "https://api.example.com/v1"
+api_key = "env:PATH"
+
+[llm.provider.SecondProvider]
+api_type = "anthropic"
+base_url = "https://api.anthropic.com/v1"
+api_key = "static-provider-key"
+"#;
+
+        let parsed: TomlConfig = toml::from_str(toml).expect("failed to parse test TOML");
+        let config = Config::from_toml(parsed, PathBuf::from(".")).expect("failed to build Config");
+
+        assert_eq!(config.llm.providers.len(), 2);
+        assert!(config.llm.providers.contains_key("myprov"));
+        assert!(config.llm.providers.contains_key("secondprovider"));
+
+        let my_provider = config
+            .llm
+            .providers
+            .get("myprov")
+            .expect("myprov provider missing");
+        assert_eq!(my_provider.api_type, ApiType::OpenAiResponses);
+        assert_eq!(my_provider.base_url, "https://api.example.com/v1");
+        assert_eq!(
+            my_provider.api_key,
+            std::env::var("PATH").expect("PATH must exist for test")
+        );
+
+        let second_provider = config
+            .llm
+            .providers
+            .get("secondprovider")
+            .expect("secondprovider provider missing");
+        assert_eq!(second_provider.api_type, ApiType::Anthropic);
+        assert_eq!(second_provider.base_url, "https://api.anthropic.com/v1");
+        assert_eq!(second_provider.api_key, "static-provider-key");
+    }
+
+    #[test]
+    fn test_legacy_llm_keys_auto_migrate_to_providers() {
+        let toml = r#"
+[llm]
+anthropic_key = "legacy-anthropic-key"
+openai_key = "legacy-openai-key"
+openrouter_key = "legacy-openrouter-key"
+"#;
+
+        let parsed: TomlConfig = toml::from_str(toml).expect("failed to parse test TOML");
+        let config = Config::from_toml(parsed, PathBuf::from(".")).expect("failed to build Config");
+
+        let anthropic_provider = config
+            .llm
+            .providers
+            .get("anthropic")
+            .expect("anthropic provider missing");
+        assert_eq!(anthropic_provider.api_type, ApiType::Anthropic);
+        assert_eq!(anthropic_provider.base_url, ANTHROPIC_PROVIDER_BASE_URL);
+        assert_eq!(anthropic_provider.api_key, "legacy-anthropic-key");
+
+        let openai_provider = config
+            .llm
+            .providers
+            .get("openai")
+            .expect("openai provider missing");
+        assert_eq!(openai_provider.api_type, ApiType::OpenAiCompletions);
+        assert_eq!(openai_provider.base_url, OPENAI_PROVIDER_BASE_URL);
+        assert_eq!(openai_provider.api_key, "legacy-openai-key");
+
+        let openrouter_provider = config
+            .llm
+            .providers
+            .get("openrouter")
+            .expect("openrouter provider missing");
+        assert_eq!(openrouter_provider.api_type, ApiType::OpenAiCompletions);
+        assert_eq!(openrouter_provider.base_url, OPENROUTER_PROVIDER_BASE_URL);
+        assert_eq!(openrouter_provider.api_key, "legacy-openrouter-key");
+    }
+
+    #[test]
+    fn test_explicit_provider_config_takes_priority_over_legacy_key_migration() {
+        let toml = r#"
+[llm]
+openai_key = "legacy-openai-key"
+
+[llm.provider.openai]
+api_type = "openai_responses"
+base_url = "https://custom.openai.example/v1"
+api_key = "explicit-openai-key"
+name = "Custom OpenAI"
+"#;
+
+        let parsed: TomlConfig = toml::from_str(toml).expect("failed to parse test TOML");
+        let config = Config::from_toml(parsed, PathBuf::from(".")).expect("failed to build Config");
+
+        let openai_provider = config
+            .llm
+            .providers
+            .get("openai")
+            .expect("openai provider missing");
+        assert_eq!(openai_provider.api_type, ApiType::OpenAiResponses);
+        assert_eq!(openai_provider.base_url, "https://custom.openai.example/v1");
+        assert_eq!(openai_provider.api_key, "explicit-openai-key");
+        assert_eq!(openai_provider.name.as_deref(), Some("Custom OpenAI"));
+        assert_eq!(config.llm.openai_key.as_deref(), Some("legacy-openai-key"));
     }
 }
