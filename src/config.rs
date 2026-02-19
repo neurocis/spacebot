@@ -1119,7 +1119,10 @@ struct TomlLlmConfig {
     deepseek_key: Option<String>,
     xai_key: Option<String>,
     mistral_key: Option<String>,
+    ollama_key: Option<String>,
+    ollama_base_url: Option<String>,
     opencode_zen_key: Option<String>,
+    nvidia_key: Option<String>,
     providers: HashMap<String, TomlProviderConfig>,
 }
 
@@ -1164,7 +1167,10 @@ impl<'de> Deserialize<'de> for TomlLlmConfig {
             deepseek_key: fields.deepseek_key,
             xai_key: fields.xai_key,
             mistral_key: fields.mistral_key,
+            ollama_key: fields.ollama_key,
+            ollama_base_url: fields.ollama_base_url,
             opencode_zen_key: fields.opencode_zen_key,
+            nvidia_key: fields.nvidia_key,
             providers: fields.providers,
         })
     }

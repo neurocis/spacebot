@@ -1,7 +1,7 @@
 //! Key-value settings storage (redb).
 
 use crate::error::{Result, SettingsError};
-use redb::{Database, ReadableTable, TableDefinition};
+use redb::{Database, TableDefinition};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 use std::sync::Arc;
