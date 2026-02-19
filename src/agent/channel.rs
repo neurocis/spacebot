@@ -499,19 +499,20 @@ impl Channel {
                 user_contents.push(UserContent::text(formatted_text));
             }
         }
+        // Separate text and non-text (image/audio) content
+        let mut text_parts = Vec::new();
+        let mut attachment_parts = Vec::new();
+        for content in user_contents {
+            match content {
+                UserContent::Text(t) => text_parts.push(t.text.clone()),
+                other => attachment_parts.push(other),
+            }
+        }
 
-        // Combine all user content into a single text
         let combined_text = format!(
             "[{} messages arrived rapidly in this channel]\n\n{}",
             message_count,
-            user_contents
-                .iter()
-                .filter_map(|c| match c {
-                    UserContent::Text(t) => Some(t.text.clone()),
-                    _ => None,
-                })
-                .collect::<Vec<_>>()
-                .join("\n")
+            text_parts.join("\n")
         );
 
         // Build system prompt with coalesce hint
@@ -519,13 +520,13 @@ impl Channel {
             .build_system_prompt_with_coalesce(message_count, elapsed_secs, unique_sender_count)
             .await;
 
-        // Run agent turn
+        // Run agent turn with any image/audio attachments preserved
         let (result, skip_flag) = self
             .run_agent_turn(
                 &combined_text,
                 &system_prompt,
                 &conversation_id,
-                Vec::new(), // Attachments already formatted into text
+                attachment_parts,
             )
             .await?;
 
