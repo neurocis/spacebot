@@ -59,6 +59,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     libsqlite3-0 \
     curl \
+    gh \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=builder /usr/local/bin/spacebot /usr/local/bin/spacebot
