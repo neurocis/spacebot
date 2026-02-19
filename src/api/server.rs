@@ -1,7 +1,7 @@
 //! HTTP server setup: router, static file serving, and API route wiring.
 
 use super::state::ApiState;
-use super::{agents, bindings, channels, config, cortex, cron, ingest, memories, messaging, models, providers, settings, skills, system};
+use super::{agents, bindings, channels, config, cortex, cron, ingest, memories, messaging, models, providers, settings, skills, system, webchat};
 
 use axum::http::{header, StatusCode, Uri};
 use axum::response::{Html, IntoResponse, Response};
@@ -77,7 +77,8 @@ pub async fn start_http_server(
         .route("/settings", get(settings::get_global_settings).put(settings::update_global_settings))
         .route("/config/raw", get(settings::get_raw_config).put(settings::update_raw_config))
         .route("/update/check", get(settings::update_check).post(settings::update_check_now))
-        .route("/update/apply", post(settings::update_apply));
+        .route("/update/apply", post(settings::update_apply))
+        .route("/webchat/send", post(webchat::webchat_send));
 
     let app = Router::new()
         .nest("/api", api_routes)

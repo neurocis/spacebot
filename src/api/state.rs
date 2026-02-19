@@ -8,6 +8,7 @@ use crate::cron::{CronStore, Scheduler};
 use crate::llm::LlmManager;
 use crate::memory::{EmbeddingModel, MemorySearch};
 use crate::messaging::MessagingManager;
+use crate::messaging::webchat::WebChatAdapter;
 use crate::prompts::PromptEngine;
 use crate::update::SharedUpdateStatus;
 use crate::{ProcessEvent, ProcessId};
@@ -86,6 +87,8 @@ pub struct ApiState {
     pub agent_tx: mpsc::Sender<crate::Agent>,
     /// Sender to remove agents from the main event loop.
     pub agent_remove_tx: mpsc::Sender<String>,
+    /// Shared webchat adapter for session management from API handlers.
+    pub webchat_adapter: ArcSwap<Option<Arc<WebChatAdapter>>>,
 }
 
 /// Events sent to SSE clients. Wraps ProcessEvents with agent context.
@@ -200,6 +203,7 @@ impl ApiState {
             defaults_config: RwLock::new(None),
             agent_tx,
             agent_remove_tx,
+            webchat_adapter: ArcSwap::from_pointee(None),
         }
     }
 
@@ -408,6 +412,11 @@ impl ApiState {
     /// Set the instance-level defaults for runtime agent creation.
     pub async fn set_defaults_config(&self, defaults: DefaultsConfig) {
         *self.defaults_config.write().await = Some(defaults);
+    }
+
+    /// Set the shared webchat adapter for API handlers.
+    pub fn set_webchat_adapter(&self, adapter: Arc<WebChatAdapter>) {
+        self.webchat_adapter.store(Arc::new(Some(adapter)));
     }
 
     /// Send an event to all SSE subscribers.

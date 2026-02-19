@@ -1319,6 +1319,10 @@ async fn initialize_agents(
         }
     }
 
+    let webchat_adapter = Arc::new(spacebot::messaging::webchat::WebChatAdapter::new());
+    new_messaging_manager.register_shared(webchat_adapter.clone()).await;
+    api_state.set_webchat_adapter(webchat_adapter);
+
     *messaging_manager = Arc::new(new_messaging_manager);
     api_state
         .set_messaging_manager(messaging_manager.clone())
