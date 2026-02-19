@@ -237,8 +237,20 @@ fn build_otlp_provider(telemetry: &TelemetryConfig) -> Option<SdkTracerProvider>
             ))
         };
 
+    // Use the async-runtime-aware BatchSpanProcessor so the export future is
+    // driven by tokio::spawn rather than a plain OS thread using
+    // futures_executor::block_on. The sync variant panics because reqwest
+    // calls tokio::time::sleep internally, which requires an active Tokio
+    // runtime on the calling thread — something the plain thread never has.
+    let batch_processor =
+        opentelemetry_sdk::trace::span_processor_with_async_runtime::BatchSpanProcessor::builder(
+            exporter,
+            opentelemetry_sdk::runtime::Tokio,
+        )
+        .build();
+
     let provider = SdkTracerProvider::builder()
-        .with_batch_exporter(exporter)
+        .with_span_processor(batch_processor)
         .with_resource(resource)
         .with_sampler(sampler)
         .build();

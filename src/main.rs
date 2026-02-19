@@ -145,8 +145,7 @@ fn cmd_start(
         config_path.clone()
     } else if spacebot::config::Config::needs_onboarding() {
         // Returns Some(path) if CLI wizard ran, None if user chose the UI.
-        spacebot::config::run_onboarding()
-            .with_context(|| "onboarding failed")?
+        spacebot::config::run_onboarding().with_context(|| "onboarding failed")?
     } else {
         None
     };
@@ -154,24 +153,41 @@ fn cmd_start(
     // Validate config loads successfully before forking
     let config = load_config(&resolved_config_path)?;
 
-    let otel_provider = if foreground {
-        spacebot::daemon::init_foreground_tracing(debug, &config.telemetry)
-    } else {
-        // Derive paths from the loaded config's instance dir
+    if !foreground {
+        // Fork the process before creating any Tokio runtime. After daemonize()
+        // returns, we are in the child process — the parent has exited. Any
+        // runtime created before this point would be in a broken state inside
+        // the child (Tokio's I/O driver and thread pool don't survive fork),
+        // which is why tracing init (and the OTLP batch exporter it creates)
+        // must happen *after* this call.
         let paths = spacebot::daemon::DaemonPaths::new(&config.instance_dir);
         spacebot::daemon::daemonize(&paths)?;
-        spacebot::daemon::init_background_tracing(&paths, debug, &config.telemetry)
-    };
+    }
 
-    // Build and run the tokio runtime for the async main
-    tokio::runtime::Builder::new_multi_thread()
+    // Build a fresh Tokio runtime in this process (the child after daemonize,
+    // or the foreground process). Tracing init — including the OTLP batch
+    // exporter — must happen inside block_on because the async
+    // BatchSpanProcessor calls tokio::spawn at construction time and requires
+    // an active runtime handle.
+    let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
-        .context("failed to build tokio runtime")?
-        .block_on(run(config, foreground, otel_provider))
+        .context("failed to build Tokio runtime")?;
+
+    runtime.block_on(async {
+        let otel_provider = if foreground {
+            spacebot::daemon::init_foreground_tracing(debug, &config.telemetry)
+        } else {
+            let paths = spacebot::daemon::DaemonPaths::new(&config.instance_dir);
+            spacebot::daemon::init_background_tracing(&paths, debug, &config.telemetry)
+        };
+
+        run(config, foreground, otel_provider).await
+    })
 }
 
-fn cmd_stop() -> anyhow::Result<()> {
+#[tokio::main]
+async fn cmd_stop() -> anyhow::Result<()> {
     let paths = spacebot::daemon::DaemonPaths::from_default();
 
     let Some(pid) = spacebot::daemon::is_running(&paths) else {
@@ -179,31 +195,23 @@ fn cmd_stop() -> anyhow::Result<()> {
         std::process::exit(1);
     };
 
-    // Use a small runtime for the IPC call
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .context("failed to build tokio runtime")?;
-
-    runtime.block_on(async {
-        match spacebot::daemon::send_command(&paths, spacebot::daemon::IpcCommand::Shutdown).await {
-            Ok(spacebot::daemon::IpcResponse::Ok) => {
-                eprintln!("stopping spacebot (pid {pid})...");
-            }
-            Ok(spacebot::daemon::IpcResponse::Error { message }) => {
-                eprintln!("shutdown failed: {message}");
-                std::process::exit(1);
-            }
-            Ok(_) => {
-                eprintln!("unexpected response from daemon");
-                std::process::exit(1);
-            }
-            Err(error) => {
-                eprintln!("failed to send shutdown command: {error}");
-                std::process::exit(1);
-            }
+    match spacebot::daemon::send_command(&paths, spacebot::daemon::IpcCommand::Shutdown).await {
+        Ok(spacebot::daemon::IpcResponse::Ok) => {
+            eprintln!("stopping spacebot (pid {pid})...");
         }
-    });
+        Ok(spacebot::daemon::IpcResponse::Error { message }) => {
+            eprintln!("shutdown failed: {message}");
+            std::process::exit(1);
+        }
+        Ok(_) => {
+            eprintln!("unexpected response from daemon");
+            std::process::exit(1);
+        }
+        Err(error) => {
+            eprintln!("failed to send shutdown command: {error}");
+            std::process::exit(1);
+        }
+    }
 
     if spacebot::daemon::wait_for_exit(pid) {
         eprintln!("spacebot stopped");
@@ -255,7 +263,10 @@ fn cmd_status() -> anyhow::Result<()> {
 
     runtime.block_on(async {
         match spacebot::daemon::send_command(&paths, spacebot::daemon::IpcCommand::Status).await {
-            Ok(spacebot::daemon::IpcResponse::Status { pid, uptime_seconds }) => {
+            Ok(spacebot::daemon::IpcResponse::Status {
+                pid,
+                uptime_seconds,
+            }) => {
                 let hours = uptime_seconds / 3600;
                 let minutes = (uptime_seconds % 3600) / 60;
                 let seconds = uptime_seconds % 60;
@@ -286,80 +297,89 @@ fn cmd_skill(
     skill_cmd: SkillCommand,
 ) -> anyhow::Result<()> {
     let config = load_config(&config_path)?;
-    
+
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .context("failed to build tokio runtime")?;
-    
+
     runtime.block_on(async {
         match skill_cmd {
-            SkillCommand::Add { spec, agent, instance } => {
+            SkillCommand::Add {
+                spec,
+                agent,
+                instance,
+            } => {
                 let target_dir = resolve_skills_dir(&config, agent.as_deref(), instance)?;
-                
+
                 println!("Installing skill from: {spec}");
                 println!("Target directory: {}", target_dir.display());
-                
+
                 let installed = spacebot::skills::install_from_github(&spec, &target_dir)
                     .await
                     .context("failed to install skill")?;
-                
+
                 println!("\nSuccessfully installed {} skill(s):", installed.len());
                 for name in installed {
                     println!("  - {name}");
                 }
-                
+
                 Ok(())
             }
-            SkillCommand::Install { path, agent, instance } => {
+            SkillCommand::Install {
+                path,
+                agent,
+                instance,
+            } => {
                 let target_dir = resolve_skills_dir(&config, agent.as_deref(), instance)?;
-                
+
                 println!("Installing skill from: {}", path.display());
                 println!("Target directory: {}", target_dir.display());
-                
+
                 let installed = spacebot::skills::install_from_file(&path, &target_dir)
                     .await
                     .context("failed to install skill")?;
-                
+
                 println!("\nSuccessfully installed {} skill(s):", installed.len());
                 for name in installed {
                     println!("  - {name}");
                 }
-                
+
                 Ok(())
             }
             SkillCommand::List { agent } => {
                 let (instance_dir, workspace_dir) = resolve_skill_dirs(&config, agent.as_deref())?;
-                
+
                 let skills = spacebot::skills::SkillSet::load(&instance_dir, &workspace_dir).await;
-                
+
                 if skills.is_empty() {
                     println!("No skills installed");
                     return Ok(());
                 }
-                
+
                 println!("Installed skills ({}):\n", skills.len());
-                
+
                 for info in skills.list() {
                     let source_label = match info.source {
                         spacebot::skills::SkillSource::Instance => "instance",
                         spacebot::skills::SkillSource::Workspace => "workspace",
                     };
-                    
+
                     println!("  {} ({})", info.name, source_label);
                     if !info.description.is_empty() {
                         println!("    {}", info.description);
                     }
                     println!();
                 }
-                
+
                 Ok(())
             }
             SkillCommand::Remove { name, agent } => {
                 let (instance_dir, workspace_dir) = resolve_skill_dirs(&config, agent.as_deref())?;
-                
-                let mut skills = spacebot::skills::SkillSet::load(&instance_dir, &workspace_dir).await;
-                
+
+                let mut skills =
+                    spacebot::skills::SkillSet::load(&instance_dir, &workspace_dir).await;
+
                 match skills.remove(&name).await? {
                     Some(path) => {
                         println!("Removed skill: {name}");
@@ -370,41 +390,44 @@ fn cmd_skill(
                         std::process::exit(1);
                     }
                 }
-                
+
                 Ok(())
             }
             SkillCommand::Info { name, agent } => {
                 let (instance_dir, workspace_dir) = resolve_skill_dirs(&config, agent.as_deref())?;
-                
+
                 let skills = spacebot::skills::SkillSet::load(&instance_dir, &workspace_dir).await;
-                
+
                 let Some(skill) = skills.get(&name) else {
                     eprintln!("Skill not found: {name}");
                     std::process::exit(1);
                 };
-                
+
                 let source_label = match skill.source {
                     spacebot::skills::SkillSource::Instance => "instance",
                     spacebot::skills::SkillSource::Workspace => "workspace",
                 };
-                
+
                 println!("Skill: {}", skill.name);
                 println!("Description: {}", skill.description);
                 println!("Source: {source_label}");
                 println!("Path: {}", skill.file_path.display());
                 println!("Base directory: {}", skill.base_dir.display());
-                
+
                 // Show a preview of the content
                 let preview_len = skill.content.chars().take(500).count();
                 if preview_len < skill.content.len() {
                     println!("\nContent preview (first 500 chars):\n");
                     println!("{}", &skill.content[..preview_len]);
-                    println!("\n... ({} more characters)", skill.content.len() - preview_len);
+                    println!(
+                        "\n... ({} more characters)",
+                        skill.content.len() - preview_len
+                    );
                 } else {
                     println!("\nContent:\n");
                     println!("{}", skill.content);
                 }
-                
+
                 Ok(())
             }
         }
@@ -444,7 +467,7 @@ fn get_agent_config<'a>(
         }
         &config.agents[0].id
     });
-    
+
     config
         .agents
         .iter()
@@ -452,13 +475,14 @@ fn get_agent_config<'a>(
         .with_context(|| format!("agent not found: {agent_id}"))
 }
 
-fn load_config(config_path: &Option<std::path::PathBuf>) -> anyhow::Result<spacebot::config::Config> {
+fn load_config(
+    config_path: &Option<std::path::PathBuf>,
+) -> anyhow::Result<spacebot::config::Config> {
     if let Some(path) = config_path {
         spacebot::config::Config::load_from_path(path)
             .with_context(|| format!("failed to load config from {}", path.display()))
     } else {
-        spacebot::config::Config::load()
-            .with_context(|| "failed to load configuration")
+        spacebot::config::Config::load().with_context(|| "failed to load configuration")
     }
 }
 
@@ -483,22 +507,27 @@ async fn run(
     let (agent_tx, mut agent_rx) = mpsc::channel::<spacebot::Agent>(8);
 
     // Start HTTP API server if enabled
-    let api_state = Arc::new(spacebot::api::ApiState::new_with_provider_sender(provider_tx, agent_tx));
+    let api_state = Arc::new(spacebot::api::ApiState::new_with_provider_sender(
+        provider_tx,
+        agent_tx,
+    ));
 
     // Start background update checker
     spacebot::update::spawn_update_checker(api_state.update_status.clone());
 
     let _http_handle = if config.api.enabled {
         // IPv6 addresses need brackets when combined with port: [::]:19898
-        let raw_bind = config.api.bind.trim_start_matches('[').trim_end_matches(']');
+        let raw_bind = config
+            .api
+            .bind
+            .trim_start_matches('[')
+            .trim_end_matches(']');
         let bind_str = if raw_bind.contains(':') {
             format!("[{}]:{}", raw_bind, config.api.port)
         } else {
             format!("{}:{}", raw_bind, config.api.port)
         };
-        let bind: std::net::SocketAddr = bind_str
-            .parse()
-            .context("invalid API bind address")?;
+        let bind: std::net::SocketAddr = bind_str.parse().context("invalid API bind address")?;
         let http_shutdown = shutdown_rx.clone();
         Some(
             spacebot::api::start_http_server(bind, api_state.clone(), http_shutdown)
@@ -516,8 +545,10 @@ async fn run(
         tracing::info!("No LLM provider keys configured. Starting in setup mode.");
         if foreground {
             eprintln!("No LLM provider keys configured.");
-            eprintln!("Please add a provider key via the web UI at http://{}:{}", 
-                config.api.bind, config.api.port);
+            eprintln!(
+                "Please add a provider key via the web UI at http://{}:{}",
+                config.api.bind, config.api.port
+            );
         }
     }
 
@@ -526,21 +557,20 @@ async fn run(
     let llm_manager = Arc::new(
         spacebot::llm::LlmManager::new(config.llm.clone())
             .await
-            .with_context(|| "failed to initialize LLM manager")?
+            .with_context(|| "failed to initialize LLM manager")?,
     );
 
     // Shared embedding model (stateless, agent-agnostic)
     let embedding_cache_dir = config.instance_dir.join("embedding_cache");
     let embedding_model = Arc::new(
         spacebot::memory::EmbeddingModel::new(&embedding_cache_dir)
-            .context("failed to initialize embedding model")?
+            .context("failed to initialize embedding model")?,
     );
 
     tracing::info!("shared resources initialized");
 
     // Initialize the language for all text lookups (must happen before PromptEngine/tools)
-    spacebot::prompts::text::init("en")
-        .with_context(|| "failed to initialize language")?;
+    spacebot::prompts::text::init("en").with_context(|| "failed to initialize language")?;
 
     // Create the PromptEngine with bundled templates (no file watching, no user overrides)
     let prompt_engine = spacebot::prompts::PromptEngine::new("en")
@@ -628,7 +658,10 @@ async fn run(
     }
 
     if foreground {
-        eprintln!("spacebot running in foreground (pid {})", std::process::id());
+        eprintln!(
+            "spacebot running in foreground (pid {})",
+            std::process::id()
+        );
     } else {
         tracing::info!(pid = std::process::id(), "spacebot daemon started");
     }
@@ -982,7 +1015,11 @@ async fn initialize_agents(
     cron_schedulers_for_shutdown: &mut Vec<Arc<spacebot::cron::Scheduler>>,
     ingestion_handles: &mut Vec<tokio::task::JoinHandle<()>>,
     cortex_handles: &mut Vec<tokio::task::JoinHandle<()>>,
-    watcher_agents: &mut Vec<(String, std::path::PathBuf, Arc<spacebot::config::RuntimeConfig>)>,
+    watcher_agents: &mut Vec<(
+        String,
+        std::path::PathBuf,
+        Arc<spacebot::config::RuntimeConfig>,
+    )>,
     discord_permissions: &mut Option<Arc<ArcSwap<spacebot::config::DiscordPermissions>>>,
     slack_permissions: &mut Option<Arc<ArcSwap<spacebot::config::SlackPermissions>>>,
     telegram_permissions: &mut Option<Arc<ArcSwap<spacebot::config::TelegramPermissions>>>,
@@ -993,34 +1030,65 @@ async fn initialize_agents(
         tracing::info!(agent_id = %agent_config.id, "initializing agent");
 
         // Ensure agent directories exist
-        std::fs::create_dir_all(&agent_config.workspace)
-            .with_context(|| format!("failed to create workspace: {}", agent_config.workspace.display()))?;
-        std::fs::create_dir_all(&agent_config.data_dir)
-            .with_context(|| format!("failed to create data dir: {}", agent_config.data_dir.display()))?;
-        std::fs::create_dir_all(&agent_config.archives_dir)
-            .with_context(|| format!("failed to create archives dir: {}", agent_config.archives_dir.display()))?;
-        std::fs::create_dir_all(&agent_config.ingest_dir())
-            .with_context(|| format!("failed to create ingest dir: {}", agent_config.ingest_dir().display()))?;
-        std::fs::create_dir_all(&agent_config.logs_dir())
-            .with_context(|| format!("failed to create logs dir: {}", agent_config.logs_dir().display()))?;
+        std::fs::create_dir_all(&agent_config.workspace).with_context(|| {
+            format!(
+                "failed to create workspace: {}",
+                agent_config.workspace.display()
+            )
+        })?;
+        std::fs::create_dir_all(&agent_config.data_dir).with_context(|| {
+            format!(
+                "failed to create data dir: {}",
+                agent_config.data_dir.display()
+            )
+        })?;
+        std::fs::create_dir_all(&agent_config.archives_dir).with_context(|| {
+            format!(
+                "failed to create archives dir: {}",
+                agent_config.archives_dir.display()
+            )
+        })?;
+        std::fs::create_dir_all(&agent_config.ingest_dir()).with_context(|| {
+            format!(
+                "failed to create ingest dir: {}",
+                agent_config.ingest_dir().display()
+            )
+        })?;
+        std::fs::create_dir_all(&agent_config.logs_dir()).with_context(|| {
+            format!(
+                "failed to create logs dir: {}",
+                agent_config.logs_dir().display()
+            )
+        })?;
 
         // Per-agent database connections
         let db = spacebot::db::Db::connect(&agent_config.data_dir)
             .await
-            .with_context(|| format!("failed to connect databases for agent '{}'", agent_config.id))?;
+            .with_context(|| {
+                format!(
+                    "failed to connect databases for agent '{}'",
+                    agent_config.id
+                )
+            })?;
 
         // Per-agent settings store (redb-backed)
         let settings_path = agent_config.data_dir.join("settings.redb");
         let settings_store = Arc::new(
-            spacebot::settings::SettingsStore::new(&settings_path)
-                .with_context(|| format!("failed to initialize settings store for agent '{}'", agent_config.id))?
+            spacebot::settings::SettingsStore::new(&settings_path).with_context(|| {
+                format!(
+                    "failed to initialize settings store for agent '{}'",
+                    agent_config.id
+                )
+            })?,
         );
 
         // Per-agent memory system
         let memory_store = spacebot::memory::MemoryStore::new(db.sqlite.clone());
         let embedding_table = spacebot::memory::EmbeddingTable::open_or_create(&db.lance)
             .await
-            .with_context(|| format!("failed to init embeddings for agent '{}'", agent_config.id))?;
+            .with_context(|| {
+                format!("failed to init embeddings for agent '{}'", agent_config.id)
+            })?;
 
         // Ensure FTS index exists for full-text search queries
         if let Err(error) = embedding_table.ensure_fts_index().await {
@@ -1041,14 +1109,18 @@ async fn initialize_agents(
         // Scaffold identity templates if missing, then load
         spacebot::identity::scaffold_identity_files(&agent_config.workspace)
             .await
-            .with_context(|| format!("failed to scaffold identity files for agent '{}'", agent_config.id))?;
+            .with_context(|| {
+                format!(
+                    "failed to scaffold identity files for agent '{}'",
+                    agent_config.id
+                )
+            })?;
         let identity = spacebot::identity::Identity::load(&agent_config.workspace).await;
 
         // Load skills (instance-level, then workspace overrides)
-        let skills = spacebot::skills::SkillSet::load(
-            &config.skills_dir(),
-            &agent_config.skills_dir(),
-        ).await;
+        let skills =
+            spacebot::skills::SkillSet::load(&config.skills_dir(), &agent_config.skills_dir())
+                .await;
 
         // Build the RuntimeConfig with all hot-reloadable values
         let runtime_config = Arc::new(spacebot::config::RuntimeConfig::new(
@@ -1131,20 +1203,21 @@ async fn initialize_agents(
 
     // Shared Discord permissions (hot-reloadable via file watcher)
     *discord_permissions = config.messaging.discord.as_ref().map(|discord_config| {
-        let perms = spacebot::config::DiscordPermissions::from_config(discord_config, &config.bindings);
+        let perms =
+            spacebot::config::DiscordPermissions::from_config(discord_config, &config.bindings);
         Arc::new(ArcSwap::from_pointee(perms))
     });
     if let Some(perms) = &*discord_permissions {
         api_state.set_discord_permissions(perms.clone()).await;
     }
 
-
-
     if let Some(discord_config) = &config.messaging.discord {
         if discord_config.enabled {
             let adapter = spacebot::messaging::discord::DiscordAdapter::new(
                 &discord_config.token,
-                discord_permissions.clone().expect("discord permissions initialized when discord is enabled"),
+                discord_permissions
+                    .clone()
+                    .expect("discord permissions initialized when discord is enabled"),
             );
             new_messaging_manager.register(adapter).await;
         }
@@ -1164,7 +1237,9 @@ async fn initialize_agents(
             let adapter = spacebot::messaging::slack::SlackAdapter::new(
                 &slack_config.bot_token,
                 &slack_config.app_token,
-                slack_permissions.clone().expect("slack permissions initialized when slack is enabled"),
+                slack_permissions
+                    .clone()
+                    .expect("slack permissions initialized when slack is enabled"),
             );
             new_messaging_manager.register(adapter).await;
         }
@@ -1172,7 +1247,8 @@ async fn initialize_agents(
 
     // Shared Telegram permissions (hot-reloadable via file watcher)
     *telegram_permissions = config.messaging.telegram.as_ref().map(|telegram_config| {
-        let perms = spacebot::config::TelegramPermissions::from_config(telegram_config, &config.bindings);
+        let perms =
+            spacebot::config::TelegramPermissions::from_config(telegram_config, &config.bindings);
         Arc::new(ArcSwap::from_pointee(perms))
     });
 
@@ -1180,7 +1256,9 @@ async fn initialize_agents(
         if telegram_config.enabled {
             let adapter = spacebot::messaging::telegram::TelegramAdapter::new(
                 &telegram_config.token,
-                telegram_permissions.clone().expect("telegram permissions initialized when telegram is enabled"),
+                telegram_permissions
+                    .clone()
+                    .expect("telegram permissions initialized when telegram is enabled"),
             );
             new_messaging_manager.register(adapter).await;
         }
@@ -1197,7 +1275,9 @@ async fn initialize_agents(
     }
 
     *messaging_manager = Arc::new(new_messaging_manager);
-    api_state.set_messaging_manager(messaging_manager.clone()).await;
+    api_state
+        .set_messaging_manager(messaging_manager.clone())
+        .await;
 
     // Start all messaging adapters and get the merged inbound stream
     let new_inbound = messaging_manager
@@ -1247,7 +1327,10 @@ async fn initialize_agents(
         let scheduler = Arc::new(spacebot::cron::Scheduler::new(cron_context));
 
         // Make cron store and scheduler available via RuntimeConfig
-        agent.deps.runtime_config.set_cron(store.clone(), scheduler.clone());
+        agent
+            .deps
+            .runtime_config
+            .set_cron(store.clone(), scheduler.clone());
 
         match store.load_all().await {
             Ok(configs) => {
@@ -1293,11 +1376,13 @@ async fn initialize_agents(
     // Start cortex bulletin loops and association loops for each agent
     for (agent_id, agent) in agents.iter() {
         let cortex_logger = spacebot::agent::cortex::CortexLogger::new(agent.db.sqlite.clone());
-        let bulletin_handle = spacebot::agent::cortex::spawn_bulletin_loop(agent.deps.clone(), cortex_logger.clone());
+        let bulletin_handle =
+            spacebot::agent::cortex::spawn_bulletin_loop(agent.deps.clone(), cortex_logger.clone());
         cortex_handles.push(bulletin_handle);
         tracing::info!(agent_id = %agent_id, "cortex bulletin loop started");
 
-        let association_handle = spacebot::agent::cortex::spawn_association_loop(agent.deps.clone(), cortex_logger);
+        let association_handle =
+            spacebot::agent::cortex::spawn_association_loop(agent.deps.clone(), cortex_logger);
         cortex_handles.push(association_handle);
         tracing::info!(agent_id = %agent_id, "cortex association loop started");
     }
@@ -1308,7 +1393,8 @@ async fn initialize_agents(
         for (agent_id, agent) in agents.iter() {
             let browser_config = (**agent.deps.runtime_config.browser_config.load()).clone();
             let brave_search_key = (**agent.deps.runtime_config.brave_search_key.load()).clone();
-            let conversation_logger = spacebot::conversation::history::ConversationLogger::new(agent.db.sqlite.clone());
+            let conversation_logger =
+                spacebot::conversation::history::ConversationLogger::new(agent.db.sqlite.clone());
             let channel_store = spacebot::conversation::ChannelStore::new(agent.db.sqlite.clone());
             let tool_server = spacebot::tools::create_cortex_chat_tool_server(
                 agent.deps.memory_search.clone(),
