@@ -890,40 +890,9 @@ impl Channel {
                 .await;
         }
 
-        // Write history back after the agentic loop completes.
-        // On hard errors (CompletionError / ToolError / ToolServerError) Rig does
-        // not carry the history back in the error variant, but it has already
-        // mutated `history` in-place and may have left dangling tool-call messages.
-        // Roll back to the pre-call snapshot so the next turn starts clean.
-        //
-        // PromptCancelled must also roll back: Rig captures the history snapshot
-        // *before* the tool batch executes (inside the tool execution closure), so
-        // the carried history contains the assistant's tool-call message but NOT the
-        // tool results. Writing that back leaves a dangling tool-call that poisons
-        // every subsequent turn with "tool call result does not follow tool call".
-        // The side-effects (reply sent, worker spawned, etc.) have already happened;
-        // we don't need the history to reflect them.
-        //
-        // MaxTurnsError is safe to write back — Rig pushes all tool results into a
-        // User message before it raises the error, so the history is consistent.
         {
             let mut guard = self.state.history.write().await;
-            match &result {
-                Ok(_) | Err(rig::completion::PromptError::MaxTurnsError { .. }) => {
-                    *guard = history;
-                }
-                Err(rig::completion::PromptError::PromptCancelled { .. }) | Err(_) => {
-                    // Roll back — PromptCancelled history is missing tool results
-                    // (captured before tool batch runs). Hard errors may have
-                    // dangling tool-call messages.
-                    tracing::debug!(
-                        channel_id = %self.id,
-                        rolled_back = history.len().saturating_sub(history_len_before),
-                        "rolling back history after cancelled or failed turn"
-                    );
-                    guard.truncate(history_len_before);
-                }
-            }
+            apply_history_after_turn(&result, &mut guard, history, history_len_before, &self.id);
         }
 
         if let Err(error) = crate::tools::remove_channel_tools(&self.tool_server).await {
@@ -2094,4 +2063,182 @@ async fn download_text_attachment(
         "<file name=\"{}\" mime=\"{}\">\n{}\n</file>",
         attachment.filename, attachment.mime_type, truncated
     ))
+}
+
+/// Write history back after the agentic loop completes.
+///
+/// On success or `MaxTurnsError`, the history Rig built is consistent and safe
+/// to keep. On `PromptCancelled` or hard errors, it must be rolled back:
+///
+/// - `PromptCancelled`: Rig snapshots history *before* the tool batch runs, so
+///   the carried history has the assistant's tool-call message but no tool
+///   results. Writing it back leaves a dangling tool-call that poisons every
+///   subsequent turn with "tool call result does not follow tool call (2013)".
+/// - Hard errors: Rig mutates history in-place and may have appended a
+///   tool-call message before the error was raised.
+///
+/// `MaxTurnsError` is safe — Rig pushes all tool results into a `User` message
+/// before raising it, so history is consistent.
+fn apply_history_after_turn(
+    result: &std::result::Result<String, rig::completion::PromptError>,
+    guard: &mut Vec<rig::message::Message>,
+    history: Vec<rig::message::Message>,
+    history_len_before: usize,
+    channel_id: &str,
+) {
+    match result {
+        Ok(_) | Err(rig::completion::PromptError::MaxTurnsError { .. }) => {
+            *guard = history;
+        }
+        Err(rig::completion::PromptError::PromptCancelled { .. }) | Err(_) => {
+            tracing::debug!(
+                channel_id = %channel_id,
+                rolled_back = history.len().saturating_sub(history_len_before),
+                "rolling back history after cancelled or failed turn"
+            );
+            guard.truncate(history_len_before);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::apply_history_after_turn;
+    use rig::completion::{CompletionError, PromptError};
+    use rig::message::Message;
+
+    fn user_msg(text: &str) -> Message {
+        Message::User {
+            content: rig::OneOrMany::one(rig::message::UserContent::text(text)),
+        }
+    }
+
+    fn assistant_msg(text: &str) -> Message {
+        Message::Assistant {
+            id: None,
+            content: rig::OneOrMany::one(rig::message::AssistantContent::text(text)),
+        }
+    }
+
+    fn make_history(msgs: &[&str]) -> Vec<Message> {
+        msgs.iter().enumerate().map(|(i, text)| {
+            if i % 2 == 0 { user_msg(text) } else { assistant_msg(text) }
+        }).collect()
+    }
+
+    /// On success, the full post-turn history is written back.
+    #[test]
+    fn ok_writes_history_back() {
+        let mut guard = make_history(&["hello"]);
+        let history = make_history(&["hello", "hi there", "how are you?"]);
+        let len_before = 1;
+
+        apply_history_after_turn(&Ok("hi there".to_string()), &mut guard, history.clone(), len_before, "test");
+
+        assert_eq!(guard, history);
+    }
+
+    /// MaxTurnsError carries consistent history (tool results included) — write it back.
+    #[test]
+    fn max_turns_writes_history_back() {
+        let mut guard = make_history(&["hello"]);
+        let history = make_history(&["hello", "hi there", "how are you?"]);
+        let len_before = 1;
+
+        let err = Err(PromptError::MaxTurnsError {
+            max_turns: 5,
+            chat_history: Box::new(history.clone()),
+            prompt: Box::new(user_msg("prompt")),
+        });
+
+        apply_history_after_turn(&err, &mut guard, history.clone(), len_before, "test");
+
+        assert_eq!(guard, history);
+    }
+
+    /// PromptCancelled carries history missing tool results — roll back to snapshot.
+    #[test]
+    fn prompt_cancelled_rolls_back() {
+        let initial = make_history(&["hello", "thinking..."]);
+        let mut guard = initial.clone();
+        // Rig appended a tool-call message before cancelling — simulated by
+        // the longer history passed as `history`.
+        let mut history = initial.clone();
+        history.push(user_msg("[dangling tool-call]"));
+        let len_before = initial.len();
+
+        let err = Err(PromptError::PromptCancelled {
+            chat_history: Box::new(history.clone()),
+            reason: "reply delivered".to_string(),
+        });
+
+        apply_history_after_turn(&err, &mut guard, history, len_before, "test");
+
+        assert_eq!(guard, initial, "history should be rolled back to pre-turn snapshot");
+    }
+
+    /// Hard completion errors also roll back to prevent dangling tool-calls.
+    #[test]
+    fn completion_error_rolls_back() {
+        let initial = make_history(&["hello", "thinking..."]);
+        let mut guard = initial.clone();
+        let mut history = initial.clone();
+        history.push(user_msg("[dangling tool-call]"));
+        let len_before = initial.len();
+
+        let err = Err(PromptError::CompletionError(CompletionError::ResponseError(
+            "API error".to_string(),
+        )));
+
+        apply_history_after_turn(&err, &mut guard, history, len_before, "test");
+
+        assert_eq!(guard, initial, "history should be rolled back after hard error");
+    }
+
+    /// After rollback, the next turn starts clean with no dangling messages.
+    #[test]
+    fn next_turn_is_clean_after_prompt_cancelled() {
+        let initial = make_history(&["hello", "thinking..."]);
+        let mut guard = initial.clone();
+        let mut poisoned_history = initial.clone();
+        poisoned_history.push(user_msg("[dangling tool-call without result]"));
+        let len_before = initial.len();
+
+        // First turn: cancelled (reply tool fired)
+        apply_history_after_turn(
+            &Err(PromptError::PromptCancelled {
+                chat_history: Box::new(poisoned_history.clone()),
+                reason: "reply delivered".to_string(),
+            }),
+            &mut guard,
+            poisoned_history,
+            len_before,
+            "test",
+        );
+
+        // Second turn: new user message appended, successful response
+        guard.push(user_msg("follow-up question"));
+        let len_before2 = guard.len();
+        let mut history2 = guard.clone();
+        history2.push(assistant_msg("clean response"));
+
+        apply_history_after_turn(&Ok("clean response".to_string()), &mut guard, history2.clone(), len_before2, "test");
+
+        assert_eq!(guard, history2, "second turn should succeed with clean history");
+        // Crucially: no dangling tool-call in history
+        let has_dangling = guard.iter().any(|m| {
+            if let Message::User { content } = m {
+                content.iter().any(|c| {
+                    if let rig::message::UserContent::Text(t) = c {
+                        t.text.contains("dangling")
+                    } else {
+                        false
+                    }
+                })
+            } else {
+                false
+            }
+        });
+        assert!(!has_dangling, "no dangling tool-call messages in history after rollback");
+    }
 }
