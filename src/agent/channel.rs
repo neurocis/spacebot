@@ -2106,6 +2106,7 @@ mod tests {
     use super::apply_history_after_turn;
     use rig::completion::{CompletionError, PromptError};
     use rig::message::Message;
+    use rig::tool::ToolSetError;
 
     fn user_msg(text: &str) -> Message {
         Message::User {
@@ -2193,6 +2194,60 @@ mod tests {
         apply_history_after_turn(&err, &mut guard, history, len_before, "test");
 
         assert_eq!(guard, initial, "history should be rolled back after hard error");
+    }
+
+    /// ToolError (tool not found) rolls back — same catch-all arm as hard errors.
+    #[test]
+    fn tool_error_rolls_back() {
+        let initial = make_history(&["hello", "thinking..."]);
+        let mut guard = initial.clone();
+        let mut history = initial.clone();
+        history.push(user_msg("[dangling tool-call]"));
+        let len_before = initial.len();
+
+        let err = Err(PromptError::ToolError(ToolSetError::ToolNotFoundError(
+            "nonexistent_tool".to_string(),
+        )));
+
+        apply_history_after_turn(&err, &mut guard, history, len_before, "test");
+
+        assert_eq!(guard, initial, "history should be rolled back after tool error");
+    }
+
+    /// Rollback on empty history is a no-op and must not panic.
+    #[test]
+    fn rollback_on_empty_history_is_noop() {
+        let mut guard: Vec<Message> = vec![];
+        let history: Vec<Message> = vec![];
+        let len_before = 0;
+
+        let err = Err(PromptError::PromptCancelled {
+            chat_history: Box::new(history.clone()),
+            reason: "reply delivered".to_string(),
+        });
+
+        apply_history_after_turn(&err, &mut guard, history, len_before, "test");
+
+        assert!(guard.is_empty(), "empty history should stay empty after rollback");
+    }
+
+    /// Rollback when nothing was appended is also a no-op (len unchanged).
+    #[test]
+    fn rollback_when_nothing_appended_is_noop() {
+        let initial = make_history(&["hello", "thinking..."]);
+        let mut guard = initial.clone();
+        // history has same length as before — Rig cancelled before appending anything
+        let history = initial.clone();
+        let len_before = initial.len();
+
+        let err = Err(PromptError::PromptCancelled {
+            chat_history: Box::new(history.clone()),
+            reason: "skip delivered".to_string(),
+        });
+
+        apply_history_after_turn(&err, &mut guard, history, len_before, "test");
+
+        assert_eq!(guard, initial, "history should be unchanged when nothing was appended");
     }
 
     /// After rollback, the next turn starts clean with no dangling messages.
