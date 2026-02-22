@@ -4373,6 +4373,8 @@ bind = "127.0.0.1"
         let bindings = vec![slack_binding(None, vec![])];
         let perms = SlackPermissions::from_config(&config, &bindings);
         assert!(perms.workspace_filter.is_none());
+    }
+
     #[test]
     fn test_cron_timezone_resolution_precedence() {
         let _lock = env_test_lock()
