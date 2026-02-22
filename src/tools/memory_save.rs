@@ -9,6 +9,10 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
+/// Maximum allowed memory content length (bytes). Prevents oversized memories
+/// from bloating the database and embedding index.
+const MAX_MEMORY_CONTENT_BYTES: usize = 50_000;
+
 /// Tool for saving memories to the store.
 #[derive(Debug, Clone)]
 pub struct MemorySaveTool {
@@ -160,6 +164,25 @@ impl Tool for MemorySaveTool {
     }
 
     async fn call(&self, args: Self::Args) -> std::result::Result<Self::Output, Self::Error> {
+        if args.content.is_empty() {
+            return Err(MemorySaveError("content must not be empty".into()));
+        }
+
+        if args.content.len() > MAX_MEMORY_CONTENT_BYTES {
+            return Err(MemorySaveError(format!(
+                "content exceeds maximum length of {MAX_MEMORY_CONTENT_BYTES} bytes (got {})",
+                args.content.len()
+            )));
+        }
+
+        if let Some(importance) = args.importance {
+            if !(0.0..=1.0).contains(&importance) {
+                return Err(MemorySaveError(format!(
+                    "importance must be between 0.0 and 1.0 (got {importance})"
+                )));
+            }
+        }
+
         // Parse memory type
         let memory_type = match args.memory_type.as_str() {
             "fact" => MemoryType::Fact,
