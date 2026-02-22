@@ -704,6 +704,20 @@ export interface OpenAiOAuthStartResponse {
 	authorization_url: string | null;
 }
 
+export interface OpenAiOAuthBrowserStartResponse {
+	success: boolean;
+	message: string;
+	authorization_url: string | null;
+	state: string | null;
+}
+
+export interface OpenAiOAuthBrowserStatusResponse {
+	found: boolean;
+	done: boolean;
+	success: boolean;
+	message: string | null;
+}
+
 // -- Model Types --
 
 export interface ModelInfo {
@@ -1191,6 +1205,29 @@ export const api = {
 			throw new Error(`API error: ${response.status}`);
 		}
 		return response.json() as Promise<ProviderActionResponse>;
+	},
+	startOpenAiOAuthBrowser: async (params: {redirectUri: string; model: string}) => {
+		const response = await fetch(`${API_BASE}/providers/openai/oauth/browser/start`, {
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify({
+				redirect_uri: params.redirectUri,
+				model: params.model,
+			}),
+		});
+		if (!response.ok) {
+			throw new Error(`API error: ${response.status}`);
+		}
+		return response.json() as Promise<OpenAiOAuthBrowserStartResponse>;
+	},
+	openAiOAuthBrowserStatus: async (state: string) => {
+		const response = await fetch(
+			`${API_BASE}/providers/openai/oauth/browser/status?state=${encodeURIComponent(state)}`,
+		);
+		if (!response.ok) {
+			throw new Error(`API error: ${response.status}`);
+		}
+		return response.json() as Promise<OpenAiOAuthBrowserStatusResponse>;
 	},
 	removeProvider: async (provider: string) => {
 		const response = await fetch(`${API_BASE}/providers/${encodeURIComponent(provider)}`, {

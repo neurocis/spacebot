@@ -3,17 +3,21 @@
 use anyhow::{Context as _, Result};
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use rand::RngCore as _;
 use reqwest::StatusCode;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest as _, Sha256};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 const CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
+const AUTHORIZE_URL: &str = "https://auth.openai.com/oauth/authorize";
 const DEVICE_CODE_URL: &str = "https://auth.openai.com/api/accounts/deviceauth/usercode";
 const DEVICE_TOKEN_URL: &str = "https://auth.openai.com/api/accounts/deviceauth/token";
 const OAUTH_TOKEN_URL: &str = "https://auth.openai.com/oauth/token";
 const DEVICE_REDIRECT_URI: &str = "https://auth.openai.com/deviceauth/callback";
 const AUTHORIZATION_URL: &str = "https://auth.openai.com/codex/device";
+const BROWSER_SCOPES: &str = "openid profile email offline_access";
 const POLLING_SAFETY_MARGIN_MS: u64 = 3000;
 const DEVICE_FLOW_TIMEOUT_SECS: u64 = 5 * 60;
 
@@ -124,6 +128,48 @@ pub struct DeviceAuthorization {
     pub user_code: String,
     pub poll_interval_secs: u64,
     pub authorization_url: String,
+}
+
+/// Data needed to complete OpenAI browser OAuth.
+#[derive(Debug, Clone, Serialize)]
+pub struct BrowserAuthorization {
+    pub authorization_url: String,
+    pub state: String,
+    pub pkce_verifier: String,
+}
+
+fn generate_random_urlsafe_string(bytes_len: usize) -> String {
+    let mut bytes = vec![0u8; bytes_len];
+    rand::rng().fill_bytes(&mut bytes);
+    URL_SAFE_NO_PAD.encode(bytes)
+}
+
+fn generate_pkce() -> (String, String) {
+    let verifier = generate_random_urlsafe_string(64);
+    let challenge = URL_SAFE_NO_PAD.encode(Sha256::digest(verifier.as_bytes()));
+    (verifier, challenge)
+}
+
+/// Build a browser-based OAuth authorization URL using PKCE.
+pub fn start_browser_authorization(redirect_uri: &str) -> BrowserAuthorization {
+    let (pkce_verifier, pkce_challenge) = generate_pkce();
+    let state = generate_random_urlsafe_string(32);
+
+    let authorization_url = format!(
+        "{authorize}?response_type=code&client_id={client_id}&redirect_uri={redirect_uri}&scope={scope}&code_challenge={challenge}&code_challenge_method=S256&id_token_add_organizations=true&codex_cli_simplified_flow=true&originator=spacebot&state={state}",
+        authorize = AUTHORIZE_URL,
+        client_id = urlencoding::encode(CLIENT_ID),
+        redirect_uri = urlencoding::encode(redirect_uri),
+        scope = urlencoding::encode(BROWSER_SCOPES),
+        challenge = urlencoding::encode(&pkce_challenge),
+        state = urlencoding::encode(&state),
+    );
+
+    BrowserAuthorization {
+        authorization_url,
+        state,
+        pkce_verifier,
+    }
 }
 
 fn parse_jwt_claims(token: &str) -> Option<TokenClaims> {
@@ -293,6 +339,57 @@ pub async fn complete_device_authorization(
     let refresh_token = token_response
         .refresh_token
         .context("OpenAI token response did not include refresh_token")?;
+
+    Ok(OAuthCredentials {
+        access_token: token_response.access_token,
+        refresh_token,
+        expires_at: chrono::Utc::now().timestamp_millis()
+            + token_response.expires_in.unwrap_or(3600) * 1000,
+        account_id,
+    })
+}
+
+/// Exchange an OAuth authorization code from browser flow for tokens.
+pub async fn exchange_browser_code(
+    code: &str,
+    redirect_uri: &str,
+    pkce_verifier: &str,
+) -> Result<OAuthCredentials> {
+    let client = reqwest::Client::new();
+    let response = client
+        .post(OAUTH_TOKEN_URL)
+        .header("Content-Type", "application/x-www-form-urlencoded")
+        .form(&[
+            ("grant_type", "authorization_code"),
+            ("code", code),
+            ("redirect_uri", redirect_uri),
+            ("client_id", CLIENT_ID),
+            ("code_verifier", pkce_verifier),
+        ])
+        .send()
+        .await
+        .context("failed to exchange OpenAI browser authorization code for tokens")?;
+
+    let status = response.status();
+    let body = response
+        .text()
+        .await
+        .context("failed to read OpenAI browser token exchange response")?;
+
+    if !status.is_success() {
+        anyhow::bail!(
+            "OpenAI browser token exchange failed ({}): {}",
+            status,
+            body
+        );
+    }
+
+    let token_response: TokenResponse = serde_json::from_str(&body)
+        .context("failed to parse OpenAI browser token exchange response")?;
+    let account_id = extract_account_id(&token_response);
+    let refresh_token = token_response
+        .refresh_token
+        .context("OpenAI browser token response did not include refresh_token")?;
 
     Ok(OAuthCredentials {
         access_token: token_response.access_token,

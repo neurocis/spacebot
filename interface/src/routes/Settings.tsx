@@ -242,6 +242,8 @@ export function Settings() {
 		pollIntervalSecs: number;
 		authorizationUrl: string;
 	} | null>(null);
+	const [openAiBrowserOAuthState, setOpenAiBrowserOAuthState] = useState<string | null>(null);
+	const [isPollingOpenAiBrowserOAuth, setIsPollingOpenAiBrowserOAuth] = useState(false);
 	const [message, setMessage] = useState<{
 		text: string;
 		type: "success" | "error";
@@ -303,6 +305,9 @@ export function Settings() {
 			pollIntervalSecs: number;
 			model: string;
 		}) => api.completeOpenAiOAuth(params),
+	});
+	const startOpenAiBrowserOAuthMutation = useMutation({
+		mutationFn: (params: {redirectUri: string; model: string}) => api.startOpenAiOAuthBrowser(params),
 	});
 
 	const removeMutation = useMutation({
@@ -397,6 +402,75 @@ export function Settings() {
 		}
 	};
 
+	const monitorOpenAiBrowserOAuth = async (stateToken: string, popup: Window | null) => {
+		setIsPollingOpenAiBrowserOAuth(true);
+		setOpenAiBrowserOAuthState(stateToken);
+		try {
+			for (let attempt = 0; attempt < 180; attempt += 1) {
+				const status = await api.openAiOAuthBrowserStatus(stateToken);
+				if (status.done) {
+					if (status.success) {
+						setEditingProvider(null);
+						setKeyInput("");
+						setModelInput("");
+						setTestedSignature(null);
+						setTestResult(null);
+						setOpenAiOAuthSession(null);
+						setMessage({text: status.message || "OpenAI configured via browser sign-in.", type: "success"});
+						queryClient.invalidateQueries({queryKey: ["providers"]});
+						setTimeout(() => {
+							queryClient.invalidateQueries({queryKey: ["agents"]});
+							queryClient.invalidateQueries({queryKey: ["overview"]});
+						}, 3000);
+					} else {
+						setMessage({text: status.message || "Browser sign-in failed.", type: "error"});
+					}
+					return;
+				}
+				await new Promise((resolve) => setTimeout(resolve, 2000));
+			}
+			setMessage({text: "Browser sign-in timed out. Please try again.", type: "error"});
+		} catch (error: any) {
+			setMessage({text: `Failed to verify browser sign-in: ${error.message}`, type: "error"});
+		} finally {
+			setIsPollingOpenAiBrowserOAuth(false);
+			setOpenAiBrowserOAuthState(null);
+			if (popup && !popup.closed) {
+				popup.close();
+			}
+		}
+	};
+
+	const handleStartOpenAiBrowserOAuth = async () => {
+		if (!modelInput.trim()) {
+			setMessage({text: "Model cannot be empty", type: "error"});
+			return;
+		}
+
+		setMessage(null);
+		try {
+			const redirectUri = `${window.location.origin}${BASE_PATH}/api/providers/openai/oauth/browser/callback`;
+			const result = await startOpenAiBrowserOAuthMutation.mutateAsync({
+				redirectUri,
+				model: modelInput.trim(),
+			});
+			if (!result.success || !result.authorization_url || !result.state) {
+				setMessage({text: result.message || "Failed to start browser sign-in", type: "error"});
+				return;
+			}
+
+			const popup = window.open(
+				result.authorization_url,
+				"spacebot-openai-oauth",
+				"popup=true,width=560,height=780,noopener,noreferrer",
+			);
+			setMessage({text: "Complete sign-in in the browser window. Waiting for callback...", type: "success"});
+			void monitorOpenAiBrowserOAuth(result.state, popup);
+		} catch (error: any) {
+			setMessage({text: `Failed: ${error.message}`, type: "error"});
+		}
+	};
+
 	const handleCompleteOpenAiOAuth = async () => {
 		if (!openAiOAuthSession || !modelInput.trim()) return;
 		setMessage(null);
@@ -437,6 +511,8 @@ export function Settings() {
 		setTestedSignature(null);
 		setTestResult(null);
 		setOpenAiOAuthSession(null);
+		setOpenAiBrowserOAuthState(null);
+		setIsPollingOpenAiBrowserOAuth(false);
 	};
 
 	const isConfigured = (providerId: string): boolean => {
@@ -602,6 +678,15 @@ export function Settings() {
 							</div>
 							<div className="mt-2 flex flex-wrap items-center gap-2">
 								<Button
+									onClick={handleStartOpenAiBrowserOAuth}
+									disabled={!modelInput.trim() || isPollingOpenAiBrowserOAuth}
+									loading={startOpenAiBrowserOAuthMutation.isPending || isPollingOpenAiBrowserOAuth}
+									variant="outline"
+									size="sm"
+								>
+									Sign in with browser
+								</Button>
+								<Button
 									onClick={handleStartOpenAiOAuth}
 									disabled={!modelInput.trim()}
 									loading={startOpenAiOAuthMutation.isPending}
@@ -633,6 +718,11 @@ export function Settings() {
 									>
 										Open verification page
 									</a>
+								</div>
+							)}
+							{openAiBrowserOAuthState && (
+								<div className="mt-2 text-xs text-ink-dull">
+									Browser OAuth state: <code className="rounded bg-app-box px-1 py-0.5">{openAiBrowserOAuthState}</code>
 								</div>
 							)}
 						</div>
