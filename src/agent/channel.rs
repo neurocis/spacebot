@@ -943,10 +943,11 @@ impl Channel {
 
     /// Dispatch the LLM result: send fallback text, log errors, clean up typing.
     ///
-    /// On retrigger turns (`is_retrigger = true`), fallback text is suppressed.
-    /// The LLM must explicitly call the `reply` tool to send a message; returning
-    /// plain text on a retrigger is treated as internal acknowledgment, not a
-    /// user-facing response.
+    /// On retrigger turns (`is_retrigger = true`), fallback text is suppressed
+    /// unless the LLM called `skip` — in that case, any text the LLM produced
+    /// is sent as a fallback to ensure worker/branch results reach the user.
+    /// The LLM sometimes incorrectly skips on retrigger turns thinking the
+    /// result was "already processed" when the user hasn't seen it yet.
     async fn handle_agent_result(
         &self,
         result: std::result::Result<String, rig::completion::PromptError>,
@@ -959,7 +960,50 @@ impl Channel {
                 let skipped = skip_flag.load(std::sync::atomic::Ordering::Relaxed);
                 let replied = replied_flag.load(std::sync::atomic::Ordering::Relaxed);
 
-                if skipped {
+                if skipped && is_retrigger {
+                    // The LLM skipped on a retrigger turn. This means a worker
+                    // or branch completed but the LLM decided not to relay the
+                    // result. If the LLM also produced text, send it as a
+                    // fallback since the user hasn't seen the result yet.
+                    let text = response.trim();
+                    if !text.is_empty() {
+                        tracing::info!(
+                            channel_id = %self.id,
+                            response_len = text.len(),
+                            "LLM skipped on retrigger but produced text, sending as fallback"
+                        );
+                        let extracted = extract_reply_from_tool_syntax(text);
+                        let source = self
+                            .conversation_id
+                            .as_deref()
+                            .and_then(|conversation_id| conversation_id.split(':').next())
+                            .unwrap_or("unknown");
+                        let final_text = crate::tools::reply::normalize_discord_mention_tokens(
+                            extracted.as_deref().unwrap_or(text),
+                            source,
+                        );
+                        if !final_text.is_empty() {
+                            if extracted.is_some() {
+                                tracing::warn!(channel_id = %self.id, "extracted reply from malformed tool syntax in retrigger fallback");
+                            }
+                            self.state
+                                .conversation_logger
+                                .log_bot_message(&self.state.channel_id, &final_text);
+                            if let Err(error) = self
+                                .response_tx
+                                .send(OutboundResponse::Text(final_text))
+                                .await
+                            {
+                                tracing::error!(%error, channel_id = %self.id, "failed to send retrigger fallback reply");
+                            }
+                        }
+                    } else {
+                        tracing::warn!(
+                            channel_id = %self.id,
+                            "LLM skipped on retrigger with no text — worker/branch result may not have been relayed"
+                        );
+                    }
+                } else if skipped {
                     tracing::debug!(channel_id = %self.id, "channel turn skipped (no response)");
                 } else if replied {
                     tracing::debug!(channel_id = %self.id, "channel turn replied via tool (fallback suppressed)");
