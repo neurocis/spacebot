@@ -1944,7 +1944,9 @@ impl Config {
         }
 
         // OAuth credentials count as configured
-        if crate::auth::credentials_path(&instance_dir).exists() {
+        if crate::auth::credentials_path(&instance_dir).exists()
+            || crate::openai_auth::credentials_path(&instance_dir).exists()
+        {
             return false;
         }
 
@@ -4268,6 +4270,26 @@ name = "Custom OpenAI"
             expires_at: chrono::Utc::now().timestamp_millis() + 3_600_000,
         };
         crate::auth::save_credentials(&instance_dir, &creds).expect("failed to save credentials");
+
+        assert!(!Config::needs_onboarding());
+    }
+
+    #[test]
+    fn test_needs_onboarding_false_with_openai_oauth_credentials() {
+        let _lock = env_test_lock()
+            .lock()
+            .expect("failed to lock env test mutex");
+        let _env = EnvGuard::new();
+
+        let instance_dir = Config::default_instance_dir();
+        let creds = crate::openai_auth::OAuthCredentials {
+            access_token: "openai-access-token-test".to_string(),
+            refresh_token: "openai-refresh-token-test".to_string(),
+            expires_at: chrono::Utc::now().timestamp_millis() + 3_600_000,
+            account_id: Some("acct_test_123".to_string()),
+        };
+        crate::openai_auth::save_credentials(&instance_dir, &creds)
+            .expect("failed to save OpenAI OAuth credentials");
 
         assert!(!Config::needs_onboarding());
     }
