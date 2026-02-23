@@ -109,6 +109,13 @@
     cargoExtraArgs = "";
   };
 
+  commonBuildEnv = ''
+    export ORT_LIB_LOCATION=${onnxruntime}/lib
+    export SPACEBOT_SKIP_FRONTEND_BUILD=1
+    mkdir -p interface/dist
+    cp -r ${frontend}/* interface/dist/
+  '';
+
   dummyRustSource = pkgs.writeText "dummy.rs" ''
     fn main() {}
   '';
@@ -131,16 +138,9 @@
   spacebot = craneLib.buildPackage (commonArgs
     // {
       inherit cargoArtifacts;
+      doCheck = false;
 
-      # Skip tests that require ONNX model file and known flaky suites in Nix builds
-      cargoTestExtraArgs = "-- --skip memory::search::tests --skip memory::store::tests --skip config::tests::test_llm_provider_tables_parse_with_env_and_lowercase_keys";
-
-      preBuild = ''
-        export ORT_LIB_LOCATION=${onnxruntime}/lib
-        export SPACEBOT_SKIP_FRONTEND_BUILD=1
-        mkdir -p interface/dist
-        cp -r ${frontend}/* interface/dist/
-      '';
+      preBuild = commonBuildEnv;
 
       postInstall = ''
         mkdir -p $out/share/spacebot
@@ -164,6 +164,16 @@
       };
     });
 
+  spacebot-tests = craneLib.cargoTest (commonArgs
+    // {
+      inherit cargoArtifacts;
+
+      # Skip tests that require ONNX model file and known flaky suites in Nix builds
+      cargoTestExtraArgs = "-- --skip memory::search::tests --skip memory::store::tests --skip config::tests::test_llm_provider_tables_parse_with_env_and_lowercase_keys";
+
+      preBuild = commonBuildEnv;
+    });
+
   spacebot-full = pkgs.symlinkJoin {
     name = "spacebot-full";
     paths = [spacebot];
@@ -184,5 +194,5 @@
       };
   };
 in {
-  inherit spacebot spacebot-full;
+  inherit spacebot spacebot-full spacebot-tests;
 }
