@@ -217,12 +217,12 @@ fn extra_models() -> Vec<ModelInfo> {
         },
         // MiniMax
         ModelInfo {
-            id: "minimax/MiniMax-M1-80k".into(),
-            name: "MiniMax M1 80K".into(),
+            id: "minimax/MiniMax-M2.5".into(),
+            name: "MiniMax M2.5".into(),
             provider: "minimax".into(),
-            context_window: Some(80000),
+            context_window: Some(200000),
             tool_call: true,
-            reasoning: false,
+            reasoning: true,
             input_audio: false,
         },
         // MiniMax CN
@@ -232,7 +232,7 @@ fn extra_models() -> Vec<ModelInfo> {
             provider: "minimax-cn".into(),
             context_window: Some(200000),
             tool_call: true,
-            reasoning: false,
+            reasoning: true,
             input_audio: false,
         },
         // Moonshot AI (Kimi)

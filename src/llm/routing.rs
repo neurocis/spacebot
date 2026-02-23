@@ -338,7 +338,7 @@ pub fn defaults_for_provider(provider: &str) -> RoutingConfig {
             }
         }
         "nvidia" => RoutingConfig::for_model("nvidia/meta/llama-3.1-405b-instruct".into()),
-        "minimax" => RoutingConfig::for_model("minimax/MiniMax-M1-80k".into()),
+        "minimax" => RoutingConfig::for_model("minimax/MiniMax-M2.5".into()),
         "minimax-cn" => RoutingConfig::for_model("minimax-cn/MiniMax-M2.5".into()),
         "moonshot" => RoutingConfig::for_model("moonshot/kimi-k2.5".into()),
         "zai-coding-plan" => RoutingConfig::for_model("zai-coding-plan/glm-5".into()),
