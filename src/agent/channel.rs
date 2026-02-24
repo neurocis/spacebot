@@ -2012,7 +2012,12 @@ async fn transcribe_audio_attachment(
 
     let (provider_id, model_name) = match deps.llm_manager.resolve_model(voice_model) {
         Ok(parts) => {
-            tracing::info!(
+            tracing::debug!(
+                provider = %parts.0,
+                model = %parts.1,
+                voice_config = %voice_model,
+                "resolved voice model for transcription"
+            );
                 provider = %parts.0,
                 model = %parts.1,
                 voice_config = %voice_model,
