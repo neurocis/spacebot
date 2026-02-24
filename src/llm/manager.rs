@@ -297,10 +297,6 @@ impl LlmManager {
                 "no provider prefix specified in model name, defaulting to 'openai'. \
                  Specify as 'provider/model' (e.g., 'openai/whisper-1') to use a different provider."
             );
-                model = %model_name,
-                "no provider prefix specified in model name, defaulting to 'openai'. \
-                 Specify as 'provider/model' (e.g., 'openai/whisper-1') to use a different provider."
-            );
             Ok(("openai".into(), model_name.into()))
         }
     }

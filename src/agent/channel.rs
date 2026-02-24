@@ -2018,11 +2018,6 @@ async fn transcribe_audio_attachment(
                 voice_config = %voice_model,
                 "resolved voice model for transcription"
             );
-                provider = %parts.0,
-                model = %parts.1,
-                voice_config = %voice_model,
-                "resolved voice model for transcription"
-            );
             parts
         }
         Err(error) => {
@@ -2069,10 +2064,6 @@ async fn transcribe_audio_attachment(
         provider.base_url.trim_end_matches('/')
     );
     tracing::debug!(
-        endpoint = %endpoint,
-        model = %model_name,
-        "sending voice transcription request"
-    );
         endpoint = %endpoint,
         model = %model_name,
         "sending voice transcription request"

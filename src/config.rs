@@ -278,6 +278,11 @@ const MOONSHOT_PROVIDER_BASE_URL: &str = "https://api.moonshot.ai";
 
 const ZHIPU_PROVIDER_BASE_URL: &str = "https://api.z.ai/api/paas/v4";
 const ZAI_CODING_PLAN_BASE_URL: &str = "https://api.z.ai/api/coding/paas/v4";
+const DEEPSEEK_PROVIDER_BASE_URL: &str = "https://api.deepseek.com";
+const GROQ_PROVIDER_BASE_URL: &str = "https://api.groq.com/openai";
+const TOGETHER_PROVIDER_BASE_URL: &str = "https://api.together.xyz";
+const XAI_PROVIDER_BASE_URL: &str = "https://api.x.ai";
+const MISTRAL_PROVIDER_BASE_URL: &str = "https://api.mistral.ai";
 const NVIDIA_PROVIDER_BASE_URL: &str = "https://integrate.api.nvidia.com";
 const FIREWORKS_PROVIDER_BASE_URL: &str = "https://api.fireworks.ai/inference";
 pub(crate) const GEMINI_PROVIDER_BASE_URL: &str =
@@ -2170,6 +2175,17 @@ impl Config {
                 });
         }
 
+        if let Some(deepseek_key) = llm.deepseek_key.clone() {
+            llm.providers
+                .entry("deepseek".to_string())
+                .or_insert_with(|| ProviderConfig {
+                    api_type: ApiType::OpenAiCompletions,
+                    base_url: DEEPSEEK_PROVIDER_BASE_URL.to_string(),
+                    api_key: deepseek_key,
+                    name: None,
+                });
+        }
+
         if let Some(gemini_key) = llm.gemini_key.clone() {
             llm.providers
                 .entry("gemini".to_string())
@@ -2177,6 +2193,50 @@ impl Config {
                     api_type: ApiType::Gemini,
                     base_url: GEMINI_PROVIDER_BASE_URL.to_string(),
                     api_key: gemini_key,
+                    name: None,
+                });
+        }
+
+        if let Some(groq_key) = llm.groq_key.clone() {
+            llm.providers
+                .entry("groq".to_string())
+                .or_insert_with(|| ProviderConfig {
+                    api_type: ApiType::OpenAiCompletions,
+                    base_url: GROQ_PROVIDER_BASE_URL.to_string(),
+                    api_key: groq_key,
+                    name: None,
+                });
+        }
+
+        if let Some(together_key) = llm.together_key.clone() {
+            llm.providers
+                .entry("together".to_string())
+                .or_insert_with(|| ProviderConfig {
+                    api_type: ApiType::OpenAiCompletions,
+                    base_url: TOGETHER_PROVIDER_BASE_URL.to_string(),
+                    api_key: together_key,
+                    name: None,
+                });
+        }
+
+        if let Some(xai_key) = llm.xai_key.clone() {
+            llm.providers
+                .entry("xai".to_string())
+                .or_insert_with(|| ProviderConfig {
+                    api_type: ApiType::OpenAiCompletions,
+                    base_url: XAI_PROVIDER_BASE_URL.to_string(),
+                    api_key: xai_key,
+                    name: None,
+                });
+        }
+
+        if let Some(mistral_key) = llm.mistral_key.clone() {
+            llm.providers
+                .entry("mistral".to_string())
+                .or_insert_with(|| ProviderConfig {
+                    api_type: ApiType::OpenAiCompletions,
+                    base_url: MISTRAL_PROVIDER_BASE_URL.to_string(),
+                    api_key: mistral_key,
                     name: None,
                 });
         }
@@ -2562,6 +2622,17 @@ impl Config {
                 });
         }
 
+        if let Some(deepseek_key) = llm.deepseek_key.clone() {
+            llm.providers
+                .entry("deepseek".to_string())
+                .or_insert_with(|| ProviderConfig {
+                    api_type: ApiType::OpenAiCompletions,
+                    base_url: DEEPSEEK_PROVIDER_BASE_URL.to_string(),
+                    api_key: deepseek_key,
+                    name: None,
+                });
+        }
+
         if let Some(gemini_key) = llm.gemini_key.clone() {
             llm.providers
                 .entry("gemini".to_string())
@@ -2569,6 +2640,50 @@ impl Config {
                     api_type: ApiType::Gemini,
                     base_url: GEMINI_PROVIDER_BASE_URL.to_string(),
                     api_key: gemini_key,
+                    name: None,
+                });
+        }
+
+        if let Some(groq_key) = llm.groq_key.clone() {
+            llm.providers
+                .entry("groq".to_string())
+                .or_insert_with(|| ProviderConfig {
+                    api_type: ApiType::OpenAiCompletions,
+                    base_url: GROQ_PROVIDER_BASE_URL.to_string(),
+                    api_key: groq_key,
+                    name: None,
+                });
+        }
+
+        if let Some(together_key) = llm.together_key.clone() {
+            llm.providers
+                .entry("together".to_string())
+                .or_insert_with(|| ProviderConfig {
+                    api_type: ApiType::OpenAiCompletions,
+                    base_url: TOGETHER_PROVIDER_BASE_URL.to_string(),
+                    api_key: together_key,
+                    name: None,
+                });
+        }
+
+        if let Some(xai_key) = llm.xai_key.clone() {
+            llm.providers
+                .entry("xai".to_string())
+                .or_insert_with(|| ProviderConfig {
+                    api_type: ApiType::OpenAiCompletions,
+                    base_url: XAI_PROVIDER_BASE_URL.to_string(),
+                    api_key: xai_key,
+                    name: None,
+                });
+        }
+
+        if let Some(mistral_key) = llm.mistral_key.clone() {
+            llm.providers
+                .entry("mistral".to_string())
+                .or_insert_with(|| ProviderConfig {
+                    api_type: ApiType::OpenAiCompletions,
+                    base_url: MISTRAL_PROVIDER_BASE_URL.to_string(),
+                    api_key: mistral_key,
                     name: None,
                 });
         }
@@ -4502,5 +4617,123 @@ id = "main"
             .get("ollama")
             .expect("ollama provider should be registered");
         assert_eq!(provider.base_url, "http://remote-ollama:11434");
+    }
+
+    /// Verify that every shorthand key field in `LlmConfig` actually registers a provider.
+    ///
+    /// This is a regression test for the recurring "unknown provider: X" bug pattern
+    /// (nvidia #82, ollama #175, deepseek #179). If a new shorthand key is added to
+    /// `LlmConfig` without wiring it up in `load_from_env` / `from_toml`, this test fails.
+    #[test]
+    fn all_shorthand_keys_register_providers_via_toml() {
+        // (toml_key, toml_value, provider_name, expected_base_url_substring)
+        let cases: &[(&str, &str, &str, &str)] = &[
+            ("anthropic_key", "test-key", "anthropic", "anthropic.com"),
+            ("openai_key", "test-key", "openai", "openai.com"),
+            ("openrouter_key", "test-key", "openrouter", "openrouter.ai"),
+            ("deepseek_key", "test-key", "deepseek", "deepseek.com"),
+            ("minimax_key", "test-key", "minimax", "minimax.io"),
+            ("minimax_cn_key", "test-key", "minimax-cn", "minimaxi.com"),
+            ("moonshot_key", "test-key", "moonshot", "moonshot.ai"),
+            ("nvidia_key", "test-key", "nvidia", "nvidia.com"),
+            ("fireworks_key", "test-key", "fireworks", "fireworks.ai"),
+            ("zhipu_key", "test-key", "zhipu", "z.ai"),
+            ("gemini_key", "test-key", "gemini", "google"),
+            ("groq_key", "test-key", "groq", "groq.com"),
+            ("together_key", "test-key", "together", "together"),
+            ("xai_key", "test-key", "xai", "x.ai"),
+            ("mistral_key", "test-key", "mistral", "mistral.ai"),
+            (
+                "ollama_base_url",
+                "http://localhost:11434",
+                "ollama",
+                "localhost:11434",
+            ),
+        ];
+
+        for (toml_key, toml_value, provider_name, url_substr) in cases {
+            let toml_str =
+                format!("[llm]\n{toml_key} = \"{toml_value}\"\n\n[[agents]]\nid = \"main\"\n");
+
+            let parsed: TomlConfig = toml::from_str(&toml_str)
+                .unwrap_or_else(|e| panic!("failed to parse toml for {toml_key}: {e}"));
+            let config = Config::from_toml(parsed, PathBuf::from("."))
+                .unwrap_or_else(|e| panic!("failed to build config for {toml_key}: {e}"));
+
+            let provider = config.llm.providers.get(*provider_name).unwrap_or_else(|| {
+                panic!(
+                    "provider '{provider_name}' not registered when '{toml_key}' is set — \
+                     add an .entry(\"{provider_name}\").or_insert_with(...) block in from_toml()"
+                )
+            });
+
+            assert!(
+                provider.base_url.contains(url_substr),
+                "provider '{provider_name}' base_url '{}' does not contain '{url_substr}'",
+                provider.base_url
+            );
+        }
+    }
+
+    #[test]
+    fn all_shorthand_keys_register_providers_via_env() {
+        let _lock = env_test_lock().lock().unwrap();
+
+        // (env_var, env_value, provider_name, expected_base_url_substring)
+        let cases: &[(&str, &str, &str, &str)] = &[
+            (
+                "ANTHROPIC_API_KEY",
+                "test-key",
+                "anthropic",
+                "anthropic.com",
+            ),
+            ("OPENAI_API_KEY", "test-key", "openai", "openai.com"),
+            (
+                "OPENROUTER_API_KEY",
+                "test-key",
+                "openrouter",
+                "openrouter.ai",
+            ),
+            ("DEEPSEEK_API_KEY", "test-key", "deepseek", "deepseek.com"),
+            ("MINIMAX_API_KEY", "test-key", "minimax", "minimax.io"),
+            ("NVIDIA_API_KEY", "test-key", "nvidia", "nvidia.com"),
+            ("FIREWORKS_API_KEY", "test-key", "fireworks", "fireworks.ai"),
+            ("ZHIPU_API_KEY", "test-key", "zhipu", "z.ai"),
+            ("GEMINI_API_KEY", "test-key", "gemini", "google"),
+            ("GROQ_API_KEY", "test-key", "groq", "groq.com"),
+            ("TOGETHER_API_KEY", "test-key", "together", "together"),
+            ("XAI_API_KEY", "test-key", "xai", "x.ai"),
+            ("MISTRAL_API_KEY", "test-key", "mistral", "mistral.ai"),
+            (
+                "OLLAMA_BASE_URL",
+                "http://localhost:11434",
+                "ollama",
+                "localhost:11434",
+            ),
+        ];
+
+        for (env_var, env_value, provider_name, url_substr) in cases {
+            let guard = EnvGuard::new();
+            unsafe {
+                std::env::set_var(env_var, env_value);
+            }
+
+            let config = Config::load_from_env(&guard.test_dir)
+                .unwrap_or_else(|e| panic!("load_from_env failed for {env_var}: {e}"));
+            drop(guard);
+
+            let provider = config.llm.providers.get(*provider_name).unwrap_or_else(|| {
+                panic!(
+                    "provider '{provider_name}' not registered when '{env_var}' is set — \
+                     add an .entry(\"{provider_name}\").or_insert_with(...) block in load_from_env()"
+                )
+            });
+
+            assert!(
+                provider.base_url.contains(url_substr),
+                "provider '{provider_name}' base_url '{}' does not contain '{url_substr}'",
+                provider.base_url
+            );
+        }
     }
 }
