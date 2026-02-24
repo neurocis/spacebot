@@ -1,11 +1,13 @@
 //! Send file tool for delivering file attachments to users (channel only).
 
 use crate::OutboundResponse;
+use crate::sandbox::Sandbox;
 use rig::completion::ToolDefinition;
 use rig::tool::Tool;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
+use std::sync::Arc;
 use tokio::sync::mpsc;
 
 /// Tool for sending files to users.
@@ -13,14 +15,78 @@ use tokio::sync::mpsc;
 /// Reads a file from the local filesystem and sends it as an attachment
 /// in the conversation. The channel process creates a response sender per
 /// conversation turn and this tool routes file responses through it.
+/// When sandbox mode is enabled, file access is restricted to the agent's
+/// workspace boundary. When sandbox is disabled, any readable path is allowed.
 #[derive(Debug, Clone)]
 pub struct SendFileTool {
     response_tx: mpsc::Sender<OutboundResponse>,
+    workspace: PathBuf,
+    sandbox: Arc<Sandbox>,
 }
 
 impl SendFileTool {
-    pub fn new(response_tx: mpsc::Sender<OutboundResponse>) -> Self {
-        Self { response_tx }
+    pub fn new(
+        response_tx: mpsc::Sender<OutboundResponse>,
+        workspace: PathBuf,
+        sandbox: Arc<Sandbox>,
+    ) -> Self {
+        Self {
+            response_tx,
+            workspace,
+            sandbox,
+        }
+    }
+
+    /// Validate that a path falls within the workspace boundary.
+    ///
+    /// Checks both the canonicalized path and individual path components for
+    /// symlinks to prevent TOCTOU races where a symlink is swapped between
+    /// validation and the actual file read.
+    fn validate_workspace_path(&self, path: &std::path::Path) -> Result<PathBuf, SendFileError> {
+        let workspace = &self.workspace;
+
+        let canonical = path.canonicalize().map_err(|error| {
+            SendFileError(format!("can't resolve path '{}': {error}", path.display()))
+        })?;
+        let workspace_canonical = workspace
+            .canonicalize()
+            .unwrap_or_else(|_| workspace.clone());
+
+        if !canonical.starts_with(&workspace_canonical) {
+            return Err(SendFileError(format!(
+                "ACCESS DENIED: Path is outside the workspace boundary. \
+                 File operations are restricted to {}.",
+                workspace.display()
+            )));
+        }
+
+        // Reject paths containing symlinks within the workspace to prevent
+        // TOCTOU races where a path component is replaced with a symlink
+        // between this check and the file read.
+        let relative_original = path
+            .strip_prefix(workspace)
+            .or_else(|_| path.strip_prefix(&workspace_canonical))
+            .unwrap_or(path);
+        let mut walk = workspace_canonical.clone();
+        for component in relative_original.components() {
+            walk.push(component);
+            match walk.symlink_metadata() {
+                Ok(meta) if meta.is_symlink() => {
+                    return Err(SendFileError(
+                        "ACCESS DENIED: Symlinks are not allowed within the workspace.".into(),
+                    ));
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    return Err(SendFileError(format!(
+                        "can't verify path component '{}': {error}",
+                        walk.display()
+                    )));
+                }
+            }
+        }
+
+        Ok(canonical)
     }
 }
 
@@ -79,11 +145,22 @@ impl Tool for SendFileTool {
     }
 
     async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
-        let path = PathBuf::from(&args.file_path);
+        let raw_path = PathBuf::from(&args.file_path);
 
-        if !path.is_absolute() {
+        if !raw_path.is_absolute() {
             return Err(SendFileError("file_path must be an absolute path".into()));
         }
+
+        let path = if self.sandbox.mode_enabled() {
+            self.validate_workspace_path(&raw_path)?
+        } else {
+            raw_path.canonicalize().map_err(|error| {
+                SendFileError(format!(
+                    "can't resolve path '{}': {error}",
+                    raw_path.display()
+                ))
+            })?
+        };
 
         let metadata = tokio::fs::metadata(&path).await.map_err(|error| {
             SendFileError(format!("can't read file '{}': {error}", path.display()))
@@ -141,5 +218,133 @@ impl Tool for SendFileTool {
             filename,
             size_bytes,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use crate::sandbox::{SandboxConfig, SandboxMode};
+    use std::fs;
+
+    fn create_sandbox(mode: SandboxMode, workspace: &std::path::Path) -> Arc<Sandbox> {
+        let config = SandboxConfig {
+            mode,
+            ..Default::default()
+        };
+        let config = Arc::new(arc_swap::ArcSwap::from_pointee(config));
+        Arc::new(Sandbox::new_for_test(config, workspace.to_path_buf()))
+    }
+
+    fn create_tool(workspace: PathBuf) -> SendFileTool {
+        let sandbox = create_sandbox(SandboxMode::Enabled, &workspace);
+        let (response_tx, _response_rx) = mpsc::channel(1);
+        SendFileTool::new(response_tx, workspace, sandbox)
+    }
+
+    #[test]
+    fn validate_workspace_path_accepts_regular_file() {
+        let temp_dir = tempfile::tempdir().expect("failed to create temp dir");
+        let workspace = temp_dir.path().join("workspace");
+        fs::create_dir_all(&workspace).expect("failed to create workspace");
+
+        let path = workspace.join("report.txt");
+        fs::write(&path, "ok").expect("failed to write test file");
+
+        let tool = create_tool(workspace.clone());
+        let validated = tool
+            .validate_workspace_path(&path)
+            .expect("path should be accepted");
+
+        assert_eq!(
+            validated,
+            path.canonicalize().expect("failed to canonicalize")
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn validate_workspace_path_rejects_symlink_components() {
+        use std::os::unix::fs::symlink;
+
+        let temp_dir = tempfile::tempdir().expect("failed to create temp dir");
+        let workspace = temp_dir.path().join("workspace");
+        let real_dir = workspace.join("real");
+        let real_file = real_dir.join("file.txt");
+        let link_dir = workspace.join("link");
+
+        fs::create_dir_all(&real_dir).expect("failed to create real dir");
+        fs::write(&real_file, "secret").expect("failed to write test file");
+        symlink(&real_dir, &link_dir).expect("failed to create symlink");
+
+        let tool = create_tool(workspace.clone());
+        let result = tool.validate_workspace_path(&link_dir.join("file.txt"));
+
+        assert!(result.is_err(), "symlink traversal should be rejected");
+        let error = result.expect_err("missing expected error").to_string();
+        assert!(
+            error.contains("Symlinks are not allowed"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn sandbox_enabled_rejects_file_outside_workspace() {
+        let temp_dir = tempfile::tempdir().expect("failed to create temp dir");
+        let workspace = temp_dir.path().join("workspace");
+        let outside = temp_dir.path().join("outside");
+        fs::create_dir_all(&workspace).expect("failed to create workspace");
+        fs::create_dir_all(&outside).expect("failed to create outside dir");
+
+        let file = outside.join("secret.txt");
+        fs::write(&file, "secret data").expect("failed to write file");
+
+        let tool = create_tool(workspace);
+        let result = tool.validate_workspace_path(&file);
+
+        assert!(result.is_err(), "should reject path outside workspace");
+        let error = result.expect_err("missing expected error").to_string();
+        assert!(error.contains("ACCESS DENIED"), "unexpected error: {error}");
+    }
+
+    #[tokio::test]
+    async fn sandbox_disabled_allows_file_outside_workspace() {
+        let temp_dir = tempfile::tempdir().expect("failed to create temp dir");
+        let workspace = temp_dir.path().join("workspace");
+        let outside = temp_dir.path().join("outside");
+        fs::create_dir_all(&workspace).expect("failed to create workspace");
+        fs::create_dir_all(&outside).expect("failed to create outside dir");
+
+        let file = outside.join("report.txt");
+        fs::write(&file, "public data").expect("failed to write file");
+
+        let sandbox = create_sandbox(SandboxMode::Disabled, &workspace);
+        let (response_tx, mut response_rx) = mpsc::channel(1);
+        let tool = SendFileTool::new(response_tx, workspace, sandbox);
+
+        let result = tool
+            .call(SendFileArgs {
+                file_path: file.to_string_lossy().into_owned(),
+                caption: None,
+            })
+            .await
+            .expect("should succeed when sandbox is disabled");
+
+        assert!(result.success);
+        assert_eq!(result.filename, "report.txt");
+        assert_eq!(result.size_bytes, 11);
+
+        // Verify the file data was actually sent through the channel.
+        let response = response_rx
+            .try_recv()
+            .expect("should have received response");
+        match response {
+            crate::OutboundResponse::File { filename, data, .. } => {
+                assert_eq!(filename, "report.txt");
+                assert_eq!(data, b"public data");
+            }
+            other => panic!("expected File response, got {other:?}"),
+        }
     }
 }

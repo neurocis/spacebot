@@ -5,14 +5,16 @@
 //! + memory extraction) happens in the spawned worker, not here.
 
 use crate::error::Result;
+use crate::hooks::SpacebotHook;
 use crate::llm::SpacebotModel;
-use crate::{AgentDeps, ChannelId, ProcessType};
+use crate::{AgentDeps, ChannelId, ProcessId, ProcessType};
 use rig::agent::AgentBuilder;
-use rig::completion::{CompletionModel as _, Prompt as _};
+use rig::completion::CompletionModel;
 use rig::message::{AssistantContent, Message, UserContent};
-use rig::tool::server::{ToolServer, ToolServerHandle};
+use rig::tool::server::ToolServerHandle;
 use std::sync::Arc;
 use tokio::sync::RwLock;
+use uuid::Uuid;
 
 /// Programmatic monitor that watches channel context size and triggers compaction.
 pub struct Compactor {
@@ -70,6 +72,21 @@ impl Compactor {
                 ?action,
                 "compaction triggered"
             );
+            if let Err(error) = self
+                .deps
+                .event_tx
+                .send(crate::ProcessEvent::CompactionTriggered {
+                    agent_id: self.deps.agent_id.clone(),
+                    channel_id: self.channel_id.clone(),
+                    threshold_reached: usage,
+                })
+            {
+                tracing::debug!(
+                    channel_id = %self.channel_id,
+                    %error,
+                    "failed to emit compaction-triggered event"
+                );
+            }
 
             match action {
                 CompactionAction::EmergencyTruncate => {
@@ -119,7 +136,8 @@ impl Compactor {
         };
 
         tokio::spawn(async move {
-            let result = run_compaction(&deps, &compactor_prompt, &history, fraction).await;
+            let result =
+                run_compaction(&deps, &compactor_prompt, &history, &channel_id, fraction).await;
 
             match result {
                 Ok(turns_compacted) => {
@@ -181,6 +199,7 @@ async fn run_compaction(
     deps: &AgentDeps,
     compactor_prompt: &str,
     history: &Arc<RwLock<Vec<Message>>>,
+    channel_id: &ChannelId,
     fraction: f32,
 ) -> Result<usize> {
     // 1. Read and remove the oldest messages from history
@@ -202,17 +221,17 @@ async fn run_compaction(
 
     // 3. Run the compaction LLM to produce summary + extracted memories
     let routing = deps.runtime_config.routing.load();
-    let model_name = routing.resolve(ProcessType::Worker, None).to_string();
+    let model_name = routing.resolve(ProcessType::Compactor, None).to_string();
     let model = SpacebotModel::make(&deps.llm_manager, &model_name)
         .with_context(&*deps.agent_id, "compactor")
         .with_routing((**routing).clone());
 
     // Give the compaction worker memory_save so it can directly persist memories
-    let tool_server: ToolServerHandle = ToolServer::new()
-        .tool(crate::tools::MemorySaveTool::new(
-            deps.memory_search.clone(),
-        ))
-        .run();
+    let tool_server: ToolServerHandle = crate::tools::create_cortex_tool_server(
+        deps.agent_id.clone(),
+        deps.memory_event_tx.clone(),
+        deps.memory_search.clone(),
+    );
 
     let agent = AgentBuilder::new(model)
         .preamble(compactor_prompt)
@@ -220,10 +239,17 @@ async fn run_compaction(
         .tool_server_handle(tool_server)
         .build();
 
+    let hook = SpacebotHook::new(
+        deps.agent_id.clone(),
+        ProcessId::Worker(Uuid::new_v4()),
+        ProcessType::Compactor,
+        Some(channel_id.clone()),
+        deps.event_tx.clone(),
+    );
+
     let mut compaction_history = Vec::new();
-    let response = agent
-        .prompt(&transcript)
-        .with_history(&mut compaction_history)
+    let response = hook
+        .prompt_once(&agent, &mut compaction_history, &transcript)
         .await;
 
     let summary = match response {
@@ -296,7 +322,21 @@ fn estimate_assistant_content_chars(content: &AssistantContent) -> usize {
         AssistantContent::ToolCall(tc) => {
             tc.function.name.len() + tc.function.arguments.to_string().len()
         }
-        AssistantContent::Reasoning(r) => r.reasoning.iter().map(|s| s.len()).sum(),
+        AssistantContent::Reasoning(r) => r
+            .content
+            .iter()
+            .map(|content| match content {
+                rig::message::ReasoningContent::Text { text, signature } => {
+                    text.len() + signature.as_ref().map_or(0, String::len)
+                }
+                rig::message::ReasoningContent::Encrypted(data) => data.len(),
+                rig::message::ReasoningContent::Redacted { data } => data.len(),
+                rig::message::ReasoningContent::Summary(summary) => summary.len(),
+                // Future variants default to 0; update this match when new variants are added
+                #[allow(unreachable_patterns)]
+                _ => 0,
+            })
+            .sum(),
         AssistantContent::Image(_) => 500,
     }
 }

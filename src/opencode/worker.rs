@@ -6,6 +6,7 @@
 
 use crate::opencode::server::OpenCodeServerPool;
 use crate::opencode::types::*;
+use crate::secrets::store::SecretsStore;
 use crate::{AgentId, ChannelId, ProcessEvent, WorkerId};
 
 use anyhow::{Context as _, bail};
@@ -30,12 +31,47 @@ pub struct OpenCodeWorker {
     pub system_prompt: Option<String>,
     /// Model override (provider/model format like "anthropic/claude-sonnet-4").
     pub model: Option<String>,
+    /// Secrets store for exact-match scrubbing of tool secret values in SSE output.
+    pub secrets_store: Option<Arc<SecretsStore>>,
+}
+
+/// Accumulated state from SSE event processing.
+struct EventState {
+    /// The most recent text part (used for status/initial result delivery).
+    last_text: String,
+    /// Currently running tool name.
+    current_tool: Option<String>,
+    /// Number of tool calls observed (for status reporting).
+    tool_calls: i64,
+    /// Guards: don't treat session.idle as completion until we've seen real work.
+    has_received_event: bool,
+    has_assistant_message: bool,
+    /// Accumulated OpenCode parts from SSE events, used as a fallback transcript
+    /// source when the post-completion `get_messages()` API call fails.
+    accumulated_parts: Vec<OpenCodePart>,
+}
+
+impl EventState {
+    fn new() -> Self {
+        Self {
+            last_text: String::new(),
+            current_tool: None,
+            tool_calls: 0,
+            has_received_event: false,
+            has_assistant_message: false,
+            accumulated_parts: Vec::new(),
+        }
+    }
 }
 
 /// Result of an OpenCode worker run.
 pub struct OpenCodeWorkerResult {
     pub session_id: String,
     pub result_text: String,
+    /// Transcript steps converted from the OpenCode messages API on completion.
+    pub transcript: Vec<crate::conversation::worker_transcript::TranscriptStep>,
+    /// Number of tool calls observed during the session.
+    pub tool_calls: i64,
 }
 
 impl OpenCodeWorker {
@@ -59,6 +95,7 @@ impl OpenCodeWorker {
             input_rx: None,
             system_prompt: None,
             model: None,
+            secrets_store: None,
         }
     }
 
@@ -89,6 +126,21 @@ impl OpenCodeWorker {
         self
     }
 
+    /// Set the secrets store for exact-match scrubbing of tool secret values.
+    pub fn with_secrets_store(mut self, store: Arc<SecretsStore>) -> Self {
+        self.secrets_store = Some(store);
+        self
+    }
+
+    /// Scrub tool secret values from text, replacing each with `[REDACTED:<name>]`.
+    /// Returns the scrubbed text. If no secrets store is set, returns the input unchanged.
+    fn scrub_text(&self, text: &str) -> String {
+        match &self.secrets_store {
+            Some(store) => crate::secrets::scrub::scrub_with_store(text, store),
+            None => text.to_string(),
+        }
+    }
+
     /// Run the worker: spawn/reuse an OpenCode server, create a session,
     /// send the task, monitor via SSE, and return the result.
     pub async fn run(mut self) -> anyhow::Result<OpenCodeWorkerResult> {
@@ -117,9 +169,24 @@ impl OpenCodeWorker {
         };
         let session_id = session.id.clone();
 
+        // Record metadata so the web UI can embed the OpenCode interface
+        let opencode_port = {
+            let guard = server.lock().await;
+            guard.port()
+        };
+        self.event_tx
+            .send(ProcessEvent::OpenCodeSessionCreated {
+                agent_id: self.agent_id.clone(),
+                worker_id: self.id,
+                session_id: session_id.clone(),
+                port: opencode_port,
+            })
+            .ok();
+
         tracing::info!(
             worker_id = %self.id,
             session_id = %session_id,
+            port = opencode_port,
             directory = %self.directory.display(),
             "OpenCode session created"
         );
@@ -151,14 +218,34 @@ impl OpenCodeWorker {
                 .await?;
         }
 
-        // Process SSE events until session goes idle or errors
-        let result_text = self
-            .process_events(event_response, &session_id, &server)
+        // Process SSE events until session goes idle or errors.
+        // EventState tracks status and last_text for the initial result delivery.
+        // The full transcript is fetched from the OpenCode API on completion.
+        let mut event_state = EventState::new();
+        self.process_events(event_response, &session_id, &server, &mut event_state)
             .await?;
+
+        // last_text is our best signal for the initial result (used for
+        // WorkerInitialResult and the fallback if API fetch fails).
+        let result_text = event_state.last_text.clone();
 
         // Interactive follow-up loop
         if let Some(mut input_rx) = self.input_rx.take() {
+            // Emit the initial result immediately so the channel can retrigger
+            // and tell the user what the worker found. Without this, the channel
+            // would block until the entire follow-up loop exits — which only
+            // happens when the channel drops the input sender, creating a deadlock.
+            let scrubbed_result = self.scrub_text(&result_text);
+            let scrubbed_result = crate::secrets::scrub::scrub_leaks(&scrubbed_result);
+            let _ = self.event_tx.send(ProcessEvent::WorkerInitialResult {
+                agent_id: self.agent_id.clone(),
+                worker_id: self.id,
+                channel_id: self.channel_id.clone(),
+                result: scrubbed_result,
+            });
+
             self.send_status("waiting for follow-up");
+            self.send_idle();
 
             while let Some(follow_up) = input_rx.recv().await {
                 self.send_status("processing follow-up");
@@ -187,11 +274,25 @@ impl OpenCodeWorker {
                 }
 
                 match self
-                    .process_events(event_response, &session_id, &server)
+                    .process_events(event_response, &session_id, &server, &mut event_state)
                     .await
                 {
                     Ok(_) => {
+                        // Emit follow-up result so the channel can retrigger
+                        // and relay this to the user — same as initial result.
+                        let follow_up_text = event_state.last_text.clone();
+                        if !follow_up_text.is_empty() {
+                            let scrubbed = self.scrub_text(&follow_up_text);
+                            let scrubbed = crate::secrets::scrub::scrub_leaks(&scrubbed);
+                            let _ = self.event_tx.send(ProcessEvent::WorkerInitialResult {
+                                agent_id: self.agent_id.clone(),
+                                worker_id: self.id,
+                                channel_id: self.channel_id.clone(),
+                                result: scrubbed,
+                            });
+                        }
                         self.send_status("waiting for follow-up");
+                        self.send_idle();
                     }
                     Err(error) => {
                         tracing::error!(
@@ -208,15 +309,58 @@ impl OpenCodeWorker {
 
         self.send_status("completed");
 
+        // Fetch the full message history from the OpenCode API and convert
+        // to TranscriptStep[] for persistence + extract all assistant text
+        // as the definitive result_text.
+        let (transcript, api_result_text) =
+            match server.lock().await.get_messages(&session_id).await {
+                Ok(messages) => {
+                    let (steps, all_text) =
+                        crate::conversation::worker_transcript::convert_opencode_messages(
+                            &messages,
+                        );
+                    (
+                        steps,
+                        if all_text.is_empty() {
+                            None
+                        } else {
+                            Some(all_text)
+                        },
+                    )
+                }
+                Err(error) => {
+                    // API call failed (server recycled, process exited, etc.).
+                    // Fall back to the OpenCodeParts accumulated from SSE events
+                    // during the session — better than losing the transcript entirely.
+                    let fallback_steps =
+                        crate::conversation::worker_transcript::convert_opencode_parts(
+                            &event_state.accumulated_parts,
+                        );
+                    tracing::warn!(
+                        worker_id = %self.id,
+                        %error,
+                        fallback_steps = fallback_steps.len(),
+                        "failed to fetch OpenCode messages for transcript, using SSE fallback"
+                    );
+                    (fallback_steps, None)
+                }
+            };
+
+        // Prefer API-fetched result text, fall back to SSE last_text
+        let final_result_text = api_result_text.unwrap_or(result_text);
+
         tracing::info!(
             worker_id = %self.id,
             session_id = %session_id,
+            transcript_steps = transcript.len(),
             "OpenCode worker completed"
         );
 
         Ok(OpenCodeWorkerResult {
             session_id,
-            result_text,
+            result_text: final_result_text,
+            transcript,
+            tool_calls: event_state.tool_calls,
         })
     }
 
@@ -227,14 +371,10 @@ impl OpenCodeWorker {
         response: reqwest::Response,
         session_id: &str,
         server: &Arc<Mutex<crate::opencode::server::OpenCodeServer>>,
+        event_state: &mut EventState,
     ) -> anyhow::Result<String> {
         let mut stream = response.bytes_stream();
         let mut buffer = String::new();
-        let mut last_text = String::new();
-        let mut current_tool: Option<String> = None;
-        // Guards: don't treat session.idle as completion until we've seen real work
-        let mut has_received_event = false;
-        let mut has_assistant_message = false;
 
         loop {
             let chunk = tokio::select! {
@@ -246,8 +386,8 @@ impl OpenCodeWorker {
 
             let Some(chunk) = chunk else {
                 // Stream ended -- if we have results, return them
-                if has_assistant_message && !last_text.is_empty() {
-                    return Ok(last_text);
+                if event_state.has_assistant_message && !event_state.last_text.is_empty() {
+                    return Ok(event_state.last_text.clone());
                 }
                 bail!("OpenCode event stream ended before session completed");
             };
@@ -258,19 +398,11 @@ impl OpenCodeWorker {
             // Parse SSE lines from buffer
             while let Some(event) = extract_sse_event(&mut buffer) {
                 match self
-                    .handle_sse_event(
-                        &event,
-                        session_id,
-                        server,
-                        &mut last_text,
-                        &mut current_tool,
-                        &mut has_received_event,
-                        &mut has_assistant_message,
-                    )
+                    .handle_sse_event(&event, session_id, server, event_state)
                     .await
                 {
                     EventAction::Continue => {}
-                    EventAction::Complete => return Ok(last_text.clone()),
+                    EventAction::Complete => return Ok(event_state.last_text.clone()),
                     EventAction::Error(message) => bail!("OpenCode session error: {message}"),
                 }
             }
@@ -278,73 +410,116 @@ impl OpenCodeWorker {
     }
 
     /// Handle a single SSE event. Returns whether to continue, complete, or error.
-    #[allow(clippy::too_many_arguments)]
     async fn handle_sse_event(
         &self,
         event: &SseEvent,
         session_id: &str,
         server: &Arc<Mutex<crate::opencode::server::OpenCodeServer>>,
-        last_text: &mut String,
-        current_tool: &mut Option<String>,
-        has_received_event: &mut bool,
-        has_assistant_message: &mut bool,
+        state: &mut EventState,
     ) -> EventAction {
         match event {
             SseEvent::MessageUpdated { info } => {
-                *has_received_event = true;
+                state.has_received_event = true;
                 // Track assistant messages for idle guard
                 if let Some(msg) = info
                     && msg.role == "assistant"
                     && let Some(sid) = &msg.session_id
                     && sid == session_id
                 {
-                    *has_assistant_message = true;
+                    state.has_assistant_message = true;
                 }
                 EventAction::Continue
             }
 
             SseEvent::MessagePartUpdated { part, .. } => {
-                *has_received_event = true;
+                state.has_received_event = true;
+
+                // Filter out parts from other sessions
+                let part_session_id = match part {
+                    Part::Text { session_id: s, .. } => s.as_deref(),
+                    Part::Tool { session_id: s, .. } => s.as_deref(),
+                    Part::StepStart { session_id: s, .. } => s.as_deref(),
+                    Part::StepFinish { session_id: s, .. } => s.as_deref(),
+                    Part::Other => None,
+                };
+                if let Some(sid) = part_session_id
+                    && sid != session_id
+                {
+                    return EventAction::Continue;
+                }
+
+                // Emit OpenCodePartUpdated for the frontend live transcript
+                // and accumulate for fallback transcript persistence.
+                if let Some(opencode_part) = part_to_opencode_part(part) {
+                    let _ = self.event_tx.send(ProcessEvent::OpenCodePartUpdated {
+                        agent_id: self.agent_id.clone(),
+                        worker_id: self.id,
+                        part: opencode_part.clone(),
+                    });
+                    state.accumulated_parts.push(opencode_part);
+                }
+
+                // Continue processing for status updates and state tracking
                 match part {
-                    Part::Text {
-                        text,
-                        session_id: part_session,
-                        ..
-                    } => {
-                        if let Some(sid) = part_session
-                            && sid != session_id
-                        {
-                            return EventAction::Continue;
+                    Part::Text { text, .. } => {
+                        state.has_assistant_message = true;
+
+                        // Exact-match scrubbing for leak detection
+                        let scrubbed = self.scrub_text(text);
+                        if let Some(leak) = crate::secrets::scrub::scan_for_leaks(&scrubbed) {
+                            tracing::warn!(
+                                worker_id = %self.id,
+                                leak_prefix = %&leak[..leak.len().min(8)],
+                                "potential secret detected in OpenCode worker output"
+                            );
                         }
-                        *has_assistant_message = true;
-                        *last_text = text.clone();
+
+                        state.last_text = scrubbed;
                     }
                     Part::Tool {
                         tool,
-                        state,
-                        session_id: part_session,
+                        state: tool_state,
                         ..
                     } => {
-                        if let Some(sid) = part_session
-                            && sid != session_id
-                        {
-                            return EventAction::Continue;
-                        }
-                        *has_assistant_message = true;
+                        state.has_assistant_message = true;
                         if let Some(tool_name) = tool
-                            && let Some(tool_state) = state
+                            && let Some(tool_state) = tool_state
                         {
                             match tool_state {
-                                ToolState::Running { title, .. } => {
-                                    *current_tool = Some(tool_name.clone());
-                                    let label = title.as_deref().unwrap_or(tool_name.as_str());
+                                ToolState::Running { title, input, .. } => {
+                                    state.current_tool = Some(tool_name.clone());
+                                    state.tool_calls += 1;
+                                    let label = title
+                                        .as_deref()
+                                        .map(String::from)
+                                        .or_else(|| describe_tool_input(tool_name, input.as_ref()))
+                                        .unwrap_or_else(|| tool_name.clone());
                                     self.send_status(&format!("running: {label}"));
                                 }
-                                ToolState::Completed { .. } => {
-                                    if current_tool.as_deref() == Some(tool_name.as_str()) {
-                                        *current_tool = None;
+                                ToolState::Completed { output, title, .. } => {
+                                    // Scrub and log potential secret-pattern hits
+                                    if let Some(output) = output {
+                                        let scrubbed = self.scrub_text(output);
+                                        if let Some(leak) =
+                                            crate::secrets::scrub::scan_for_leaks(&scrubbed)
+                                        {
+                                            tracing::warn!(
+                                                worker_id = %self.id,
+                                                tool = %tool_name,
+                                                leak_prefix = %&leak[..leak.len().min(8)],
+                                                "potential secret detected in OpenCode tool output"
+                                            );
+                                        }
                                     }
-                                    self.send_status("working");
+
+                                    if state.current_tool.as_deref() == Some(tool_name.as_str()) {
+                                        state.current_tool = None;
+                                    }
+                                    let done_label = title
+                                        .as_deref()
+                                        .filter(|t| !t.is_empty())
+                                        .unwrap_or(tool_name.as_str());
+                                    self.send_status(&format!("done: {done_label}"));
                                 }
                                 ToolState::Error { error, .. } => {
                                     let description = error.as_deref().unwrap_or("unknown");
@@ -372,11 +547,11 @@ impl OpenCodeWorker {
 
                 // Guard: don't complete until we've seen actual work.
                 // OpenCode can send an early idle event before the prompt is processed.
-                if !*has_received_event || !*has_assistant_message {
+                if !state.has_received_event || !state.has_assistant_message {
                     tracing::trace!(
                         worker_id = %self.id,
-                        has_received_event,
-                        has_assistant_message,
+                        has_received_event = state.has_received_event,
+                        has_assistant_message = state.has_assistant_message,
                         "ignoring early session.idle"
                     );
                     return EventAction::Continue;
@@ -537,6 +712,84 @@ impl OpenCodeWorker {
             channel_id: self.channel_id.clone(),
             status: status.to_string(),
         });
+    }
+
+    /// Send an idle event to mark this worker as waiting for follow-up input.
+    fn send_idle(&self) {
+        let _ = self.event_tx.send(ProcessEvent::WorkerIdle {
+            agent_id: self.agent_id.clone(),
+            worker_id: self.id,
+            channel_id: self.channel_id.clone(),
+        });
+    }
+}
+
+/// Extract a human-readable description from a tool's input JSON.
+///
+/// OpenCode tool inputs have well-known shapes (e.g. `read` has `filePath`,
+/// `bash` has `description` and `command`, `grep` has `pattern`). When the
+/// running-state `title` is absent we derive a label from the input fields
+/// so the transcript shows "reading src/main.rs" instead of "running: read".
+fn describe_tool_input(tool_name: &str, input: Option<&serde_json::Value>) -> Option<String> {
+    let input = input?.as_object()?;
+    match tool_name {
+        "read" | "write" | "edit" => {
+            let file_path = input.get("filePath")?.as_str()?;
+            // Show just the last 3 path components to keep it short
+            let short = short_path(file_path);
+            Some(short.to_string())
+        }
+        "bash" => {
+            // Prefer the LLM-provided description, fall back to command
+            if let Some(description) = input.get("description").and_then(|v| v.as_str())
+                && !description.is_empty()
+            {
+                return Some(truncate_status(description, 80));
+            }
+            let command = input.get("command")?.as_str()?;
+            Some(truncate_status(command, 60))
+        }
+        "glob" => {
+            let pattern = input.get("pattern")?.as_str()?;
+            Some(format!("glob {pattern}"))
+        }
+        "grep" => {
+            let pattern = input.get("pattern")?.as_str()?;
+            Some(format!("search \"{pattern}\""))
+        }
+        "task" => {
+            let description = input.get("description")?.as_str()?;
+            Some(truncate_status(description, 80))
+        }
+        _ => None,
+    }
+}
+
+/// Shorten an absolute file path to at most the last 3 components.
+fn short_path(path: &str) -> &str {
+    let mut count = 0;
+    for (idx, byte) in path.bytes().enumerate().rev() {
+        if byte == b'/' {
+            count += 1;
+            if count == 3 {
+                return &path[idx + 1..];
+            }
+        }
+    }
+    path
+}
+
+/// Truncate a status string to `max` characters, appending "…" if trimmed.
+fn truncate_status(text: &str, max: usize) -> String {
+    if text.len() <= max {
+        text.to_string()
+    } else {
+        let boundary = text
+            .char_indices()
+            .nth(max.saturating_sub(1))
+            .map(|(idx, _)| idx)
+            .unwrap_or(max);
+        format!("{}…", &text[..boundary])
     }
 }
 

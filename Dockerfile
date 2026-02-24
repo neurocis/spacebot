@@ -21,6 +21,7 @@ WORKDIR /build
 # 1. Fetch and cache Rust dependencies.
 #    cargo fetch needs a valid target, so we create stubs that get replaced later.
 COPY Cargo.toml Cargo.lock ./
+COPY vendor/ vendor/
 RUN mkdir src && echo "fn main() {}" > src/main.rs && touch src/lib.rs \
     && cargo build --release \
     && rm -rf src
@@ -35,45 +36,33 @@ RUN cd interface && bun run build
 #    build.rs runs the frontend build (already done above, node_modules present).
 #    prompts/ is needed for include_str! in src/prompts/text.rs.
 #    migrations/ is needed for sqlx::migrate! in src/db.rs.
+#    docs/ is needed for rust-embed in src/self_awareness.rs.
+#    AGENTS.md, README.md, CHANGELOG.md are needed for include_str! in src/self_awareness.rs.
 COPY build.rs ./
 COPY prompts/ prompts/
 COPY migrations/ migrations/
+COPY docs/ docs/
+COPY AGENTS.md README.md CHANGELOG.md ./
 COPY src/ src/
 RUN SPACEBOT_SKIP_FRONTEND_BUILD=1 cargo build --release \
     && mv /build/target/release/spacebot /usr/local/bin/spacebot \
     && cargo clean -p spacebot --release --target-dir /build/target
 
-# ---- Slim stage ----
-# Minimal runtime with just the binary. No browser.
-FROM debian:bookworm-slim AS slim
+# ---- Runtime stage ----
+# Minimal runtime with Chrome runtime libraries for fetcher-downloaded Chromium.
+# Chrome itself is downloaded on first browser tool use and cached on the volume.
+FROM debian:bookworm-slim
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     libsqlite3-0 \
     curl \
     gh \
-    && rm -rf /var/lib/apt/lists/*
-
-COPY --from=builder /usr/local/bin/spacebot /usr/local/bin/spacebot
-COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
-RUN chmod +x /usr/local/bin/docker-entrypoint.sh
-
-ENV SPACEBOT_DIR=/data
-ENV SPACEBOT_DEPLOYMENT=docker
-EXPOSE 19898 18789
-
-HEALTHCHECK --interval=30s --timeout=5s --retries=3 \
-    CMD curl -f http://localhost:19898/api/health || exit 1
-
-ENTRYPOINT ["docker-entrypoint.sh"]
-CMD ["spacebot", "start", "--foreground"]
-
-# ---- Full stage ----
-# Slim + Chromium for browser workers.
-FROM slim AS full
-
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    chromium \
+    bubblewrap \
+    openssh-server \
+    # Chrome runtime dependencies — required whether Chrome is system-installed
+    # or downloaded by the built-in fetcher. The fetcher provides the browser
+    # binary; these are the shared libraries it links against.
     fonts-liberation \
     libnss3 \
     libatk-bridge2.0-0 \
@@ -90,5 +79,16 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libxtst6 \
     && rm -rf /var/lib/apt/lists/*
 
-ENV CHROME_PATH=/usr/bin/chromium
-ENV CHROME_FLAGS="--no-sandbox --disable-dev-shm-usage --disable-gpu"
+COPY --from=builder /usr/local/bin/spacebot /usr/local/bin/spacebot
+COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
+RUN chmod +x /usr/local/bin/docker-entrypoint.sh
+
+ENV SPACEBOT_DIR=/data
+ENV SPACEBOT_DEPLOYMENT=docker
+EXPOSE 19898 18789
+
+HEALTHCHECK --interval=30s --timeout=5s --retries=3 \
+    CMD curl -f http://localhost:19898/api/health || exit 1
+
+ENTRYPOINT ["docker-entrypoint.sh"]
+CMD ["spacebot", "start", "--foreground"]

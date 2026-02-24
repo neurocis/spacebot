@@ -1,19 +1,24 @@
 import { Link } from "@tanstack/react-router";
 import { AnimatePresence, motion } from "framer-motion";
+import { useMutation, useQueryClient } from "@tanstack/react-query";
+import { api } from "@/api/client";
 import type { ChannelInfo } from "@/api/client";
-import type { ActiveBranch, ActiveWorker, ChannelLiveState } from "@/hooks/useChannelLiveState";
+import { isOpenCodeWorker, type ActiveBranch, type ActiveWorker, type ChannelLiveState } from "@/hooks/useChannelLiveState";
 import { LiveDuration } from "@/components/LiveDuration";
 import { formatTimeAgo, formatTimestamp, platformIcon, platformColor } from "@/lib/format";
 
 const VISIBLE_MESSAGES = 6;
 
 function WorkerBadge({ worker }: { worker: ActiveWorker }) {
+	const oc = isOpenCodeWorker(worker);
 	return (
-		<div className="flex items-center gap-2 rounded-md bg-amber-500/10 px-2.5 py-1.5 text-tiny">
-			<div className="h-1.5 w-1.5 animate-pulse rounded-full bg-amber-400" />
+		<div className={`flex items-center gap-2 rounded-md px-2.5 py-1.5 text-tiny ${
+			oc ? "bg-zinc-500/10" : "bg-amber-500/10"
+		}`}>
+			<div className={`h-1.5 w-1.5 animate-pulse rounded-full ${oc ? "bg-zinc-400" : "bg-amber-400"}`} />
 			<div className="min-w-0 flex-1">
 				<div className="flex items-center gap-1.5">
-					<span className="font-medium text-amber-300">Worker</span>
+					<span className={`font-medium ${oc ? "text-zinc-300" : "text-amber-300"}`}>Worker</span>
 					<span className="truncate text-ink-dull">{worker.task}</span>
 				</div>
 				<div className="mt-0.5 flex items-center gap-2 text-ink-faint">
@@ -21,7 +26,7 @@ function WorkerBadge({ worker }: { worker: ActiveWorker }) {
 					{worker.currentTool && (
 						<>
 							<span className="text-ink-faint/50">·</span>
-							<span className="text-amber-400/70">{worker.currentTool}</span>
+							<span className={oc ? "text-zinc-400/70" : "text-amber-400/70"}>{worker.currentTool}</span>
 						</>
 					)}
 					{worker.toolCalls > 0 && (
@@ -73,6 +78,7 @@ export function ChannelCard({
 	channel: ChannelInfo;
 	liveState: ChannelLiveState | undefined;
 }) {
+	const queryClient = useQueryClient();
 	const isTyping = liveState?.isTyping ?? false;
 	const timeline = liveState?.timeline ?? [];
 	const messages = timeline.filter((item) => item.type === "message");
@@ -81,11 +87,16 @@ export function ChannelCard({
 	const visible = messages.slice(-VISIBLE_MESSAGES);
 	const hasActivity = workers.length > 0 || branches.length > 0;
 
+	const deleteChannel = useMutation({
+		mutationFn: () => api.deleteChannel(channel.agent_id, channel.id),
+		onSuccess: () => queryClient.invalidateQueries({ queryKey: ["channels"] }),
+	});
+
 	return (
 		<Link
 			to="/agents/$agentId/channels/$channelId"
 			params={{ agentId: channel.agent_id, channelId: channel.id }}
-			className="flex flex-col rounded-lg border border-app-line bg-app-darkBox transition-colors hover:border-app-line/80 hover:bg-app-darkBox/80"
+			className="group/card flex flex-col rounded-lg border border-app-line bg-app-darkBox transition-colors hover:border-app-line/80 hover:bg-app-darkBox/80"
 		>
 			{/* Header */}
 			<div className="flex items-start justify-between p-4 pb-2">
@@ -118,7 +129,20 @@ export function ChannelCard({
 						)}
 					</div>
 				</div>
-				<div className="ml-2 flex-shrink-0">
+				<div className="ml-2 flex shrink-0 items-center gap-2">
+					<button
+						onClick={(e) => {
+							e.preventDefault();
+							e.stopPropagation();
+							deleteChannel.mutate();
+						}}
+						className="rounded p-1 text-ink-faint opacity-0 transition-opacity hover:bg-ink/10 hover:text-ink group-hover/card:opacity-100"
+						title="Delete channel"
+					>
+						<svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+							<path d="M4 4l8 8M12 4l-8 8" />
+						</svg>
+					</button>
 					<div className={`h-2 w-2 rounded-full ${
 						hasActivity ? "bg-amber-400 animate-pulse" :
 						isTyping ? "bg-accent animate-pulse" :
@@ -165,7 +189,7 @@ export function ChannelCard({
 									<span className={`flex-shrink-0 text-tiny font-medium ${
 										message.role === "user" ? "text-accent-faint" : "text-green-400"
 									}`}>
-										{message.role === "user" ? (message.sender_name ?? "user") : "bot"}
+										{message.role === "user" ? (message.sender_name ?? "user") : (message.sender_name ?? "bot")}
 									</span>
 									<p className="line-clamp-1 text-sm text-ink-faint">{message.content}</p>
 								</motion.div>

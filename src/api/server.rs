@@ -2,8 +2,9 @@
 
 use super::state::ApiState;
 use super::{
-    agents, bindings, channels, config, cortex, cron, ingest, mcp, memories, messaging, models,
-    providers, settings, skills, system, webchat,
+    agents, bindings, channels, config, cortex, cron, ingest, links, mcp, memories, messaging,
+    models, opencode_proxy, providers, secrets, settings, skills, system, tasks, tools, webchat,
+    workers,
 };
 
 use axum::Json;
@@ -13,7 +14,7 @@ use axum::extract::{DefaultBodyLimit, Request, State};
 use axum::http::{StatusCode, Uri, header};
 use axum::middleware::{self, Next};
 use axum::response::{Html, IntoResponse, Response};
-use axum::routing::{delete, get, post, put};
+use axum::routing::{any, delete, get, post, put};
 use rust_embed::Embed;
 use serde_json::json;
 use tower_http::cors::CorsLayer;
@@ -60,6 +61,7 @@ pub async fn start_http_server(
             "/agents",
             get(agents::list_agents)
                 .post(agents::create_agent)
+                .put(agents::update_agent)
                 .delete(agents::delete_agent),
         )
         .route("/agents/mcp", get(agents::list_agent_mcp))
@@ -81,9 +83,19 @@ pub async fn start_http_server(
         )
         .route("/mcp/status", get(mcp::mcp_status))
         .route("/agents/overview", get(agents::agent_overview))
-        .route("/channels", get(channels::list_channels))
+        .route(
+            "/channels",
+            get(channels::list_channels).delete(channels::delete_channel),
+        )
+        .route("/channels/archive", put(channels::set_channel_archive))
         .route("/channels/messages", get(channels::channel_messages))
         .route("/channels/status", get(channels::channel_status))
+        .route("/agents/workers", get(workers::list_workers))
+        .route("/agents/workers/detail", get(workers::worker_detail))
+        .route(
+            "/opencode/{port}/{*path}",
+            any(opencode_proxy::opencode_proxy),
+        )
         .route("/agents/memories", get(memories::list_memories))
         .route("/agents/memories/search", get(memories::search_memories))
         .route("/agents/memories/graph", get(memories::memory_graph))
@@ -112,6 +124,18 @@ pub async fn start_http_server(
         .route("/agents/cron/executions", get(cron::cron_executions))
         .route("/agents/cron/trigger", post(cron::trigger_cron))
         .route("/agents/cron/toggle", put(cron::toggle_cron))
+        .route(
+            "/agents/tasks",
+            get(tasks::list_tasks).post(tasks::create_task),
+        )
+        .route(
+            "/agents/tasks/{number}",
+            get(tasks::get_task)
+                .put(tasks::update_task)
+                .delete(tasks::delete_task),
+        )
+        .route("/agents/tasks/{number}/approve", post(tasks::approve_task))
+        .route("/agents/tasks/{number}/execute", post(tasks::execute_task))
         .route("/channels/cancel", post(channels::cancel_process))
         .route(
             "/agents/ingest/files",
@@ -121,6 +145,22 @@ pub async fn start_http_server(
         .route("/agents/skills", get(skills::list_skills))
         .route("/agents/skills/install", post(skills::install_skill))
         .route("/agents/skills/remove", delete(skills::remove_skill))
+        .route("/agents/tools", get(tools::list_tools))
+        // Secret store management
+        .route("/secrets/status", get(secrets::secrets_status))
+        .route("/secrets", get(secrets::list_secrets))
+        .route(
+            "/secrets/{name}",
+            put(secrets::put_secret).delete(secrets::delete_secret),
+        )
+        .route("/secrets/{name}/info", get(secrets::secret_info))
+        .route("/secrets/migrate", post(secrets::migrate_secrets))
+        .route("/secrets/encrypt", post(secrets::enable_encryption))
+        .route("/secrets/unlock", post(secrets::unlock_secrets))
+        .route("/secrets/lock", post(secrets::lock_secrets))
+        .route("/secrets/rotate", post(secrets::rotate_key))
+        .route("/secrets/export", post(secrets::export_secrets))
+        .route("/secrets/import", post(secrets::import_secrets))
         .route("/skills/registry/browse", get(skills::registry_browse))
         .route("/skills/registry/search", get(skills::registry_search))
         .route(
@@ -135,10 +175,6 @@ pub async fn start_http_server(
             "/providers/openai/oauth/browser/status",
             get(providers::openai_browser_oauth_status),
         )
-        .route(
-            "/providers/openai/oauth/browser/callback",
-            get(providers::openai_browser_oauth_callback),
-        )
         .route("/providers/test", post(providers::test_provider_model))
         .route("/providers/{provider}", delete(providers::delete_provider))
         .route("/models", get(models::get_models))
@@ -149,6 +185,10 @@ pub async fn start_http_server(
             post(messaging::disconnect_platform),
         )
         .route("/messaging/toggle", post(messaging::toggle_platform))
+        .route(
+            "/messaging/instances",
+            post(messaging::create_messaging_instance).delete(messaging::delete_messaging_instance),
+        )
         .route(
             "/bindings",
             get(bindings::list_bindings)
@@ -171,6 +211,23 @@ pub async fn start_http_server(
         .route("/update/apply", post(settings::update_apply))
         .route("/webchat/send", post(webchat::webchat_send))
         .route("/webchat/history", get(webchat::webchat_history))
+        .route("/links", get(links::list_links).post(links::create_link))
+        .route(
+            "/links/{from}/{to}",
+            put(links::update_link).delete(links::delete_link),
+        )
+        .route("/agents/{id}/links", get(links::agent_links))
+        .route("/topology", get(links::topology))
+        .route("/groups", get(links::list_groups).post(links::create_group))
+        .route(
+            "/groups/{name}",
+            put(links::update_group).delete(links::delete_group),
+        )
+        .route("/humans", get(links::list_humans).post(links::create_human))
+        .route(
+            "/humans/{id}",
+            put(links::update_human).delete(links::delete_human),
+        )
         .layer(DefaultBodyLimit::max(10 * 1024 * 1024))
         .layer(middleware::from_fn_with_state(
             state.clone(),

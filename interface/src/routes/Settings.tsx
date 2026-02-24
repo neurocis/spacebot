@@ -1,17 +1,18 @@
 import { useState, useEffect, useRef } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { api, type GlobalSettingsResponse } from "@/api/client";
-import { Button, Input, SettingSidebarButton, Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter, Select, SelectTrigger, SelectValue, SelectContent, SelectItem, Toggle } from "@/ui";
+import { api, type GlobalSettingsResponse, type UpdateStatus, type SecretCategory, type SecretListItem, type StoreState } from "@/api/client";
+import { Badge, Button, Input, SettingSidebarButton, Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter, Select, SelectTrigger, SelectValue, SelectContent, SelectItem, Toggle } from "@/ui";
 import { useSearch, useNavigate } from "@tanstack/react-router";
-import { ChannelSettingCard, DisabledChannelCard } from "@/components/ChannelSettingCard";
+import { PlatformCatalog, InstanceCard, AddInstanceCard } from "@/components/ChannelSettingCard";
 import { ModelSelect } from "@/components/ModelSelect";
 import { ProviderIcon } from "@/lib/providerIcons";
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
 import { faSearch } from "@fortawesome/free-solid-svg-icons";
 
 import { parse as parseToml } from "smol-toml";
+import { useTheme, THEMES, type ThemeId } from "@/hooks/useTheme";
 
-type SectionId = "providers" | "channels" | "api-keys" | "server" | "opencode" | "worker-logs" | "config-file";
+type SectionId = "appearance" | "providers" | "channels" | "api-keys" | "secrets" | "server" | "opencode" | "worker-logs" | "updates" | "config-file";
 
 const SECTIONS = [
 	{
@@ -33,6 +34,12 @@ const SECTIONS = [
 		description: "Third-party service keys",
 	},
 	{
+		id: "secrets" as const,
+		label: "Secrets",
+		group: "general" as const,
+		description: "Encrypted secret storage",
+	},
+	{
 		id: "server" as const,
 		label: "Server",
 		group: "system" as const,
@@ -49,6 +56,18 @@ const SECTIONS = [
 		label: "Worker Logs",
 		group: "system" as const,
 		description: "Worker execution logging",
+	},
+	{
+		id: "updates" as const,
+		label: "Updates",
+		group: "system" as const,
+		description: "Release checks and update controls",
+	},
+	{
+		id: "appearance" as const,
+		label: "Appearance",
+		group: "general" as const,
+		description: "Theme and display settings",
 	},
 	{
 		id: "config-file" as const,
@@ -73,12 +92,28 @@ const PROVIDERS = [
 		defaultModel: "openrouter/anthropic/claude-sonnet-4",
 	},
 	{
+		id: "kilo",
+		name: "Kilo Gateway",
+		description: "OpenAI-compatible multi-provider gateway",
+		placeholder: "sk-...",
+		envVar: "KILO_API_KEY",
+		defaultModel: "kilo/anthropic/claude-sonnet-4.5",
+	},
+	{
 		id: "opencode-zen",
 		name: "OpenCode Zen",
 		description: "Multi-format gateway (Kimi, GLM, MiniMax, Qwen)",
 		placeholder: "...",
 		envVar: "OPENCODE_ZEN_API_KEY",
 		defaultModel: "opencode-zen/kimi-k2.5",
+	},
+	{
+		id: "opencode-go",
+		name: "OpenCode Go",
+		description: "Lite OpenCode model catalog and limits",
+		placeholder: "...",
+		envVar: "OPENCODE_GO_API_KEY",
+		defaultModel: "opencode-go/kimi-k2.5",
 	},
 	{
 		id: "anthropic",
@@ -243,6 +278,12 @@ export function Settings() {
 		text: string;
 		type: "success" | "error";
 	} | null>(null);
+	const [openAiOAuthDialogOpen, setOpenAiOAuthDialogOpen] = useState(false);
+	const [deviceCodeInfo, setDeviceCodeInfo] = useState<{
+		userCode: string;
+		verificationUrl: string;
+	} | null>(null);
+	const [deviceCodeCopied, setDeviceCodeCopied] = useState(false);
 	const [message, setMessage] = useState<{
 		text: string;
 		type: "success" | "error";
@@ -317,6 +358,9 @@ export function Settings() {
 
 	const currentSignature = `${editingProvider ?? ""}|${keyInput.trim()}|${modelInput.trim()}`;
 
+	const oauthAutoStartRef = useRef(false);
+	const oauthAbortRef = useRef<AbortController | null>(null);
+
 	const handleTestModel = async (): Promise<boolean> => {
 		if (!editingProvider || !keyInput.trim() || !modelInput.trim()) return false;
 		setMessage(null);
@@ -357,13 +401,17 @@ export function Settings() {
 		});
 	};
 
-	const monitorOpenAiBrowserOAuth = async (stateToken: string, popup: Window | null) => {
+	const monitorOpenAiBrowserOAuth = async (stateToken: string, signal: AbortSignal) => {
 		setIsPollingOpenAiBrowserOAuth(true);
 		setOpenAiBrowserOAuthMessage(null);
 		try {
-			for (let attempt = 0; attempt < 180; attempt += 1) {
+			for (let attempt = 0; attempt < 360; attempt += 1) {
+				if (signal.aborted) return;
 				const status = await api.openAiOAuthBrowserStatus(stateToken);
+				if (signal.aborted) return;
 				if (status.done) {
+					setDeviceCodeInfo(null);
+					setDeviceCodeCopied(false);
 					if (status.success) {
 						setOpenAiBrowserOAuthMessage({
 							text: status.message || "ChatGPT OAuth configured.",
@@ -376,58 +424,123 @@ export function Settings() {
 						}, 3000);
 					} else {
 						setOpenAiBrowserOAuthMessage({
-							text: status.message || "Browser sign-in failed.",
+							text: status.message || "Sign-in failed.",
 							type: "error",
 						});
 					}
 					return;
 				}
-				await new Promise((resolve) => setTimeout(resolve, 2000));
+				await new Promise((resolve) => {
+					const onAbort = () => {
+						clearTimeout(timer);
+						resolve(undefined);
+					};
+					const timer = setTimeout(() => {
+						signal.removeEventListener("abort", onAbort);
+						resolve(undefined);
+					}, 2000);
+					signal.addEventListener("abort", onAbort, { once: true });
+				});
 			}
+			if (signal.aborted) return;
+			setDeviceCodeInfo(null);
+			setDeviceCodeCopied(false);
 			setOpenAiBrowserOAuthMessage({
-				text: "Browser sign-in timed out. Please try again.",
+				text: "Sign-in timed out. Please try again.",
 				type: "error",
 			});
 		} catch (error: any) {
+			if (signal.aborted) return;
+			setDeviceCodeInfo(null);
+			setDeviceCodeCopied(false);
 			setOpenAiBrowserOAuthMessage({
-				text: `Failed to verify browser sign-in: ${error.message}`,
+				text: `Failed to verify sign-in: ${error.message}`,
 				type: "error",
 			});
 		} finally {
 			setIsPollingOpenAiBrowserOAuth(false);
-			if (popup && !popup.closed) {
-				popup.close();
-			}
 		}
 	};
 
 	const handleStartChatGptOAuth = async () => {
 		setOpenAiBrowserOAuthMessage(null);
+		setDeviceCodeInfo(null);
+		setDeviceCodeCopied(false);
 		try {
 			const result = await startOpenAiBrowserOAuthMutation.mutateAsync({
 				model: CHATGPT_OAUTH_DEFAULT_MODEL,
 			});
-			if (!result.success || !result.authorization_url || !result.state) {
+			if (!result.success || !result.user_code || !result.verification_url || !result.state) {
 				setOpenAiBrowserOAuthMessage({
-					text: result.message || "Failed to start browser sign-in",
+					text: result.message || "Failed to start device sign-in",
 					type: "error",
 				});
 				return;
 			}
 
-			const popup = window.open(
-				result.authorization_url,
-				"spacebot-openai-oauth",
-				"popup=true,width=560,height=780,noopener,noreferrer",
-			);
-			setOpenAiBrowserOAuthMessage({
-				text: "Complete sign-in in the browser window. Waiting for callback...",
-				type: "success",
+			oauthAbortRef.current?.abort();
+			const abort = new AbortController();
+			oauthAbortRef.current = abort;
+
+			setDeviceCodeInfo({
+				userCode: result.user_code,
+				verificationUrl: result.verification_url,
 			});
-			void monitorOpenAiBrowserOAuth(result.state, popup);
+			void monitorOpenAiBrowserOAuth(result.state, abort.signal);
 		} catch (error: any) {
 			setOpenAiBrowserOAuthMessage({text: `Failed: ${error.message}`, type: "error"});
 		}
+	};
+
+	useEffect(() => {
+		if (!openAiOAuthDialogOpen) {
+			oauthAutoStartRef.current = false;
+			oauthAbortRef.current?.abort();
+			oauthAbortRef.current = null;
+			setDeviceCodeInfo(null);
+			setDeviceCodeCopied(false);
+			setOpenAiBrowserOAuthMessage(null);
+			setIsPollingOpenAiBrowserOAuth(false);
+			return;
+		}
+
+		if (oauthAutoStartRef.current) return;
+		oauthAutoStartRef.current = true;
+		void handleStartChatGptOAuth();
+	}, [openAiOAuthDialogOpen]);
+
+	const handleCopyDeviceCode = async () => {
+		if (!deviceCodeInfo) return;
+		try {
+			if (navigator.clipboard?.writeText) {
+				await navigator.clipboard.writeText(deviceCodeInfo.userCode);
+			} else {
+				const textarea = document.createElement("textarea");
+				textarea.value = deviceCodeInfo.userCode;
+				textarea.setAttribute("readonly", "");
+				textarea.style.position = "absolute";
+				textarea.style.left = "-9999px";
+				document.body.appendChild(textarea);
+				textarea.select();
+				document.execCommand("copy");
+				document.body.removeChild(textarea);
+			}
+			setDeviceCodeCopied(true);
+		} catch (error: any) {
+			setOpenAiBrowserOAuthMessage({
+				text: `Failed to copy code: ${error.message}`,
+				type: "error",
+			});
+		}
+	};
+
+	const handleOpenDeviceLogin = () => {
+		if (!deviceCodeInfo || !deviceCodeCopied) return;
+		window.open(
+			deviceCodeInfo.verificationUrl,
+			"spacebot-openai-device",
+			"popup=true,width=780,height=960,noopener,noreferrer",
+		);
 	};
 
 	const handleClose = () => {
@@ -445,9 +558,9 @@ export function Settings() {
 	};
 
 	return (
-		<div className="flex h-full">
+		<div className="flex h-full min-h-0 overflow-hidden">
 			{/* Sidebar */}
-			<div className="flex w-52 flex-shrink-0 flex-col border-r border-app-line/50 bg-app-darkBox/20 overflow-y-auto">
+			<div className="flex min-h-0 w-52 flex-shrink-0 flex-col overflow-y-auto border-r border-app-line/50 bg-app-darkBox/20">
 				<div className="px-3 pb-1 pt-4">
 					<span className="text-tiny font-medium uppercase tracking-wider text-ink-faint">
 						Settings
@@ -467,14 +580,16 @@ export function Settings() {
 			</div>
 
 			{/* Content */}
-			<div className="flex flex-1 flex-col overflow-hidden">
+			<div className="flex min-h-0 flex-1 flex-col overflow-hidden">
 				<header className="flex h-12 items-center border-b border-app-line bg-app-darkBox/50 px-6">
 					<h1 className="font-plex text-sm font-medium text-ink">
 						{SECTIONS.find((s) => s.id === activeSection)?.label}
 					</h1>
 				</header>
-				<div className="flex-1 overflow-y-auto">
-					{activeSection === "providers" ? (
+				<div className="min-h-0 flex-1 overflow-y-auto overscroll-contain">
+					{activeSection === "appearance" ? (
+						<AppearanceSection />
+					) : activeSection === "providers" ? (
 						<div className="mx-auto max-w-2xl px-6 py-6">
 							{/* Section header */}
 							<div className="mb-6">
@@ -522,13 +637,18 @@ export function Settings() {
 												removing={removeMutation.isPending}
 											/>,
 											provider.id === "openai" ? (
-												<ChatGptOAuthCard
+												<ProviderCard
 													key="openai-chatgpt"
+													provider="openai-chatgpt"
+													name="ChatGPT Plus (OAuth)"
+													description="Sign in with your ChatGPT Plus account using a device code."
 													configured={isConfigured("openai-chatgpt")}
 													defaultModel={CHATGPT_OAUTH_DEFAULT_MODEL}
-													isPolling={isPollingOpenAiBrowserOAuth}
-													message={openAiBrowserOAuthMessage}
-													onSignIn={handleStartChatGptOAuth}
+													onEdit={() => setOpenAiOAuthDialogOpen(true)}
+													onRemove={() => removeMutation.mutate("openai-chatgpt")}
+													removing={removeMutation.isPending}
+													actionLabel="Sign in"
+													showRemove={isConfigured("openai-chatgpt")}
 												/>
 											) : null,
 										]
@@ -551,17 +671,34 @@ export function Settings() {
 									, etc.).
 								</p>
 							</div>
+
+							<ChatGptOAuthDialog
+								open={openAiOAuthDialogOpen}
+								onOpenChange={setOpenAiOAuthDialogOpen}
+								isRequesting={startOpenAiBrowserOAuthMutation.isPending}
+								isPolling={isPollingOpenAiBrowserOAuth}
+								message={openAiBrowserOAuthMessage}
+								deviceCodeInfo={deviceCodeInfo}
+								deviceCodeCopied={deviceCodeCopied}
+								onCopyDeviceCode={handleCopyDeviceCode}
+								onOpenDeviceLogin={handleOpenDeviceLogin}
+								onRestart={handleStartChatGptOAuth}
+							/>
 						</div>
 					) : activeSection === "channels" ? (
 						<ChannelsSection />
 					) : activeSection === "api-keys" ? (
 						<ApiKeysSection settings={globalSettings} isLoading={globalSettingsLoading} />
+					) : activeSection === "secrets" ? (
+						<SecretsSection />
 					) : activeSection === "server" ? (
 						<ServerSection settings={globalSettings} isLoading={globalSettingsLoading} />
 					) : activeSection === "opencode" ? (
 						<OpenCodeSection settings={globalSettings} isLoading={globalSettingsLoading} />
 					) : activeSection === "worker-logs" ? (
 						<WorkerLogsSection settings={globalSettings} isLoading={globalSettingsLoading} />
+					) : activeSection === "updates" ? (
+						<UpdatesSection />
 					) : activeSection === "config-file" ? (
 						<ConfigFileSection />
 					) : null}
@@ -662,8 +799,73 @@ export function Settings() {
 	);
 }
 
+function AppearanceSection() {
+	const { theme, setTheme } = useTheme();
+
+	return (
+		<div className="mx-auto max-w-2xl px-6 py-6">
+			<div className="mb-6">
+				<h2 className="font-plex text-sm font-semibold text-ink">Theme</h2>
+				<p className="mt-1 text-sm text-ink-dull">
+					Choose a theme for the dashboard interface.
+				</p>
+			</div>
+
+			<div className="grid grid-cols-2 gap-3">
+				{THEMES.map((t) => (
+					<button
+						key={t.id}
+						onClick={() => setTheme(t.id)}
+						className={`group relative flex flex-col items-start rounded-lg border p-4 text-left transition-colors ${
+							theme === t.id
+								? "border-accent bg-accent/10"
+								: "border-app-line bg-app-box hover:border-app-line/80 hover:bg-app-hover"
+						}`}
+					>
+						<div className="flex w-full items-center justify-between">
+							<span className="text-sm font-medium text-ink">{t.name}</span>
+							{theme === t.id && (
+								<span className="h-2 w-2 rounded-full bg-accent" />
+							)}
+						</div>
+						<p className="mt-1 text-sm text-ink-dull">{t.description}</p>
+						<ThemePreview themeId={t.id} />
+					</button>
+				))}
+			</div>
+		</div>
+	);
+}
+
+function ThemePreview({ themeId }: { themeId: ThemeId }) {
+	const colors = {
+		default: { bg: "#0d0d0f", sidebar: "#0a0a0b", accent: "#a855f7" },
+		vanilla: { bg: "#ffffff", sidebar: "#f5f5f6", accent: "#3b82f6" },
+		midnight: { bg: "#14162b", sidebar: "#0c0e1a", accent: "#3b82f6" },
+		noir: { bg: "#080808", sidebar: "#000000", accent: "#3b82f6" },
+	};
+	const c = colors[themeId];
+
+	return (
+		<div
+			className="mt-3 flex h-12 w-full overflow-hidden rounded border border-app-line/50"
+			style={{ backgroundColor: c.bg }}
+		>
+			<div className="w-8 border-r" style={{ backgroundColor: c.sidebar, borderColor: c.accent + "30" }} />
+			<div className="flex flex-1 flex-col gap-1 p-1.5">
+				<div className="h-1.5 w-12 rounded-sm" style={{ backgroundColor: c.accent }} />
+				<div className="h-1 w-16 rounded-sm opacity-30" style={{ backgroundColor: c.accent }} />
+				<div className="h-1 w-10 rounded-sm opacity-20" style={{ backgroundColor: c.accent }} />
+			</div>
+		</div>
+	);
+}
+
+type Platform = "discord" | "slack" | "telegram" | "twitch" | "email" | "webhook";
+
 function ChannelsSection() {
-	const [expandedPlatform, setExpandedPlatform] = useState<string | null>(null);
+	const [expandedKey, setExpandedKey] = useState<string | null>(null);
+	const [addingPlatform, setAddingPlatform] = useState<Platform | null>(null);
 
 	const { data: messagingStatus, isLoading } = useQuery({
 		queryKey: ["messaging-status"],
@@ -671,26 +873,22 @@ function ChannelsSection() {
 		staleTime: 5_000,
 	});
 
-	const PLATFORMS = [
-		{ platform: "discord" as const, name: "Discord", description: "Discord bot integration" },
-		{ platform: "slack" as const, name: "Slack", description: "Slack bot integration" },
-		{ platform: "telegram" as const, name: "Telegram", description: "Telegram bot integration" },
-		{ platform: "twitch" as const, name: "Twitch", description: "Twitch chat integration" },
-		{ platform: "webhook" as const, name: "Webhook", description: "HTTP webhook receiver" },
-	] as const;
+	const instances = messagingStatus?.instances ?? [];
 
-	const COMING_SOON = [
-		{ platform: "email", name: "Email", description: "IMAP polling for inbound, SMTP for outbound" },
-		{ platform: "whatsapp", name: "WhatsApp", description: "Meta Cloud API integration" },
-		{ platform: "matrix", name: "Matrix", description: "Decentralized chat protocol" },
-		{ platform: "imessage", name: "iMessage", description: "macOS-only AppleScript bridge" },
-		{ platform: "irc", name: "IRC", description: "TLS socket connection" },
-		{ platform: "lark", name: "Lark", description: "Feishu/Lark webhook integration" },
-		{ platform: "dingtalk", name: "DingTalk", description: "Chinese enterprise webhook integration" },
-	];
+	// Determine whether to show default or named add form
+	function handleAddInstance(platform: Platform) {
+		setAddingPlatform(platform);
+	}
+
+	function isDefaultAdd(): boolean {
+		if (!addingPlatform) return true;
+		return !instances.some(
+			(inst) => inst.platform === addingPlatform && inst.name === null,
+		);
+	}
 
 	return (
-		<div className="mx-auto max-w-2xl px-6 py-6">
+		<div className="mx-auto max-w-3xl px-6 py-6">
 			<div className="mb-6">
 				<h2 className="font-plex text-sm font-semibold text-ink">Messaging Platforms</h2>
 				<p className="mt-1 text-sm text-ink-dull">
@@ -704,21 +902,49 @@ function ChannelsSection() {
 					Loading channels...
 				</div>
 			) : (
-				<div className="flex flex-col gap-3">
-					{PLATFORMS.map(({ platform: p, name: n, description: d }) => (
-						<ChannelSettingCard
-							key={p}
-							platform={p}
-							name={n}
-							description={d}
-							status={messagingStatus?.[p]}
-							expanded={expandedPlatform === p}
-							onToggle={() => setExpandedPlatform(expandedPlatform === p ? null : p)}
-						/>
-					))}
-					{COMING_SOON.map(({ platform: p, name: n, description: d }) => (
-						<DisabledChannelCard key={p} platform={p} name={n} description={d} />
-					))}
+				<div className="grid grid-cols-[200px_1fr] gap-6">
+					{/* Left column: Platform catalog */}
+					<div className="flex-shrink-0">
+						<PlatformCatalog onAddInstance={handleAddInstance} />
+					</div>
+
+					{/* Right column: Configured instances */}
+					<div className="flex flex-col gap-3 min-w-0">
+						{/* Active add-instance card */}
+						{addingPlatform && (
+							<AddInstanceCard
+								platform={addingPlatform}
+								isDefault={isDefaultAdd()}
+								onCancel={() => setAddingPlatform(null)}
+								onCreated={() => setAddingPlatform(null)}
+							/>
+						)}
+
+						{/* Configured instance cards */}
+						{instances.length > 0 ? (
+							instances.map((instance) => (
+								<InstanceCard
+									key={instance.runtime_key}
+									instance={instance}
+									expanded={expandedKey === instance.runtime_key}
+									onToggleExpand={() =>
+										setExpandedKey(
+											expandedKey === instance.runtime_key ? null : instance.runtime_key,
+										)
+									}
+								/>
+							))
+						) : !addingPlatform ? (
+							<div className="rounded-lg border border-app-line border-dashed bg-app-box/50 p-8 text-center">
+								<p className="text-sm text-ink-dull">
+									No messaging platforms configured yet.
+								</p>
+								<p className="mt-1 text-sm text-ink-faint">
+									Click a platform on the left to get started.
+								</p>
+							</div>
+						) : null}
+					</div>
 				</div>
 			)}
 		</div>
@@ -726,6 +952,654 @@ function ChannelsSection() {
 }
 
 
+
+// ── Secrets Section ──────────────────────────────────────────────────────
+
+function SecretsSection() {
+	const queryClient = useQueryClient();
+
+	// Store status.
+	const { data: storeStatus, isLoading: statusLoading } = useQuery({
+		queryKey: ["secrets-status"],
+		queryFn: () => api.secretsStatus(),
+		staleTime: 5_000,
+	});
+
+	// Secret list.
+	const { data: secretsData, isLoading: secretsLoading } = useQuery({
+		queryKey: ["secrets"],
+		queryFn: () => api.listSecrets(),
+		staleTime: 5_000,
+	});
+
+	const secrets = secretsData?.secrets ?? [];
+	const isLoading = statusLoading || secretsLoading;
+	const state: StoreState = storeStatus?.state ?? "unencrypted";
+	const isLocked = state === "locked";
+	const canMutate = !isLocked;
+
+	// ── UI state ─────────────────────────────────────────────────────────
+	const [addDialogOpen, setAddDialogOpen] = useState(false);
+	const [editingSecret, setEditingSecret] = useState<string | null>(null);
+	const [deleteTarget, setDeleteTarget] = useState<string | null>(null);
+	const [nameInput, setNameInput] = useState("");
+	const [valueInput, setValueInput] = useState("");
+	const [categoryInput, setCategoryInput] = useState<SecretCategory>("tool");
+	const [message, setMessage] = useState<{ text: string; type: "success" | "error" } | null>(null);
+
+	// Encryption flow state.
+	const [encryptDialogOpen, setEncryptDialogOpen] = useState(false);
+	const [masterKeyDisplay, setMasterKeyDisplay] = useState<string | null>(null);
+	const [masterKeyCopied, setMasterKeyCopied] = useState(false);
+	const [unlockKeyInput, setUnlockKeyInput] = useState("");
+	const [rotateDialogOpen, setRotateDialogOpen] = useState(false);
+
+	const [filterCategory, setFilterCategory] = useState<"all" | SecretCategory>("all");
+	const [searchQuery, setSearchQuery] = useState("");
+
+	// ── Mutations ────────────────────────────────────────────────────────
+	const invalidateSecrets = () => {
+		queryClient.invalidateQueries({ queryKey: ["secrets"] });
+		queryClient.invalidateQueries({ queryKey: ["secrets-status"] });
+	};
+
+	const putMutation = useMutation({
+		mutationFn: ({ name, value, category }: { name: string; value: string; category?: SecretCategory }) =>
+			api.putSecret(name, value, category),
+		onSuccess: (result) => {
+			invalidateSecrets();
+			setAddDialogOpen(false);
+			setEditingSecret(null);
+			setNameInput("");
+			setValueInput("");
+			setMessage({
+				text: result.reload_required
+					? `${result.name} saved (${result.category}). Restart required for system secrets to take effect.`
+					: `${result.name} saved (${result.category}).`,
+				type: "success",
+			});
+		},
+		onError: (error) => {
+			setMessage({ text: `Failed: ${error.message}`, type: "error" });
+		},
+	});
+
+	const deleteMutation = useMutation({
+		mutationFn: (name: string) => api.deleteSecret(name),
+		onSuccess: (result) => {
+			invalidateSecrets();
+			setDeleteTarget(null);
+			setMessage({
+				text: result.warning
+					? `Deleted ${result.deleted}. ${result.warning}`
+					: `Deleted ${result.deleted}.`,
+				type: "success",
+			});
+		},
+		onError: (error) => {
+			setMessage({ text: `Failed: ${error.message}`, type: "error" });
+		},
+	});
+
+	const encryptMutation = useMutation({
+		mutationFn: () => api.enableEncryption(),
+		onSuccess: (result) => {
+			invalidateSecrets();
+			setMasterKeyDisplay(result.master_key);
+			setMasterKeyCopied(false);
+		},
+		onError: (error) => {
+			setMessage({ text: `Failed: ${error.message}`, type: "error" });
+			setEncryptDialogOpen(false);
+		},
+	});
+
+	const unlockMutation = useMutation({
+		mutationFn: (key: string) => api.unlockSecrets(key),
+		onSuccess: () => {
+			invalidateSecrets();
+			setUnlockKeyInput("");
+			setMessage({ text: "Secret store unlocked.", type: "success" });
+		},
+		onError: (error) => {
+			setMessage({ text: `Unlock failed: ${error.message}`, type: "error" });
+		},
+	});
+
+	const lockMutation = useMutation({
+		mutationFn: () => api.lockSecrets(),
+		onSuccess: () => {
+			invalidateSecrets();
+			setMessage({ text: "Secret store locked.", type: "success" });
+		},
+		onError: (error) => {
+			setMessage({ text: `Failed: ${error.message}`, type: "error" });
+		},
+	});
+
+	const rotateMutation = useMutation({
+		mutationFn: () => api.rotateKey(),
+		onSuccess: (result) => {
+			invalidateSecrets();
+			setRotateDialogOpen(false);
+			setMasterKeyDisplay(result.master_key);
+			setMasterKeyCopied(false);
+			setEncryptDialogOpen(true);
+		},
+		onError: (error) => {
+			setMessage({ text: `Failed: ${error.message}`, type: "error" });
+			setRotateDialogOpen(false);
+		},
+	});
+
+	const migrateMutation = useMutation({
+		mutationFn: () => api.migrateSecrets(),
+		onSuccess: (result) => {
+			invalidateSecrets();
+			setMessage({
+				text: result.migrated.length > 0
+					? `Migrated ${result.migrated.length} secrets from config.toml.`
+					: result.message,
+				type: result.migrated.length > 0 ? "success" : "success",
+			});
+		},
+		onError: (error) => {
+			setMessage({ text: `Migration failed: ${error.message}`, type: "error" });
+		},
+	});
+
+	// ── Handlers ─────────────────────────────────────────────────────────
+	const handleOpenAdd = () => {
+		setNameInput("");
+		setValueInput("");
+		setCategoryInput("tool");
+		setMessage(null);
+		setAddDialogOpen(true);
+	};
+
+	const handleOpenEdit = (secret: SecretListItem) => {
+		setEditingSecret(secret.name);
+		setNameInput(secret.name);
+		setValueInput("");
+		setCategoryInput(secret.category);
+		setMessage(null);
+	};
+
+	const handleSave = () => {
+		const name = editingSecret ?? nameInput.trim().toUpperCase();
+		if (!name || !valueInput) return;
+		putMutation.mutate({ name, value: valueInput, category: categoryInput });
+	};
+
+	const handleCopyKey = async () => {
+		if (!masterKeyDisplay) return;
+		try {
+			await navigator.clipboard.writeText(masterKeyDisplay);
+			setMasterKeyCopied(true);
+		} catch {
+			// Fallback
+			const textarea = document.createElement("textarea");
+			textarea.value = masterKeyDisplay;
+			textarea.setAttribute("readonly", "");
+			textarea.style.position = "absolute";
+			textarea.style.left = "-9999px";
+			document.body.appendChild(textarea);
+			textarea.select();
+			document.execCommand("copy");
+			document.body.removeChild(textarea);
+			setMasterKeyCopied(true);
+		}
+	};
+
+	const filteredSecrets = secrets.filter((secret) => {
+		if (filterCategory !== "all" && secret.category !== filterCategory) return false;
+		if (searchQuery && !secret.name.toLowerCase().includes(searchQuery.toLowerCase())) return false;
+		return true;
+	});
+
+	return (
+		<div className="mx-auto max-w-2xl px-6 py-6">
+			{/* Header */}
+			<div className="mb-6">
+				<h2 className="font-plex text-sm font-semibold text-ink">Secrets</h2>
+				<p className="mt-1 text-sm text-ink-dull">
+					Manage credentials for LLM providers (system) and CLI tools used by workers (tool).
+					System secrets are never exposed to worker subprocesses. Tool secrets are injected as
+					environment variables.
+				</p>
+			</div>
+
+			{/* Status bar */}
+			{storeStatus && (
+				<div className="mb-4 flex items-center gap-3 rounded-md border border-app-line bg-app-darkBox/20 px-4 py-3">
+					<div className="flex items-center gap-2">
+						<div className={`h-2 w-2 rounded-full ${
+							state === "unlocked" ? "bg-green-500"
+								: state === "locked" ? "bg-red-500"
+									: "bg-amber-500"
+						}`} />
+						<span className="text-sm font-medium text-ink">
+							{state === "unlocked" ? "Encrypted & Unlocked"
+								: state === "locked" ? "Encrypted & Locked"
+									: "Unencrypted"}
+						</span>
+					</div>
+					<div className="flex-1" />
+					<span className="text-tiny text-ink-faint">
+						{storeStatus.secret_count} secrets ({storeStatus.system_count} system, {storeStatus.tool_count} tool)
+					</span>
+				</div>
+			)}
+
+			{/* Encryption banner (unencrypted stores) */}
+			{state === "unencrypted" && !storeStatus?.platform_managed && (
+				<div className="mb-4 rounded-md border border-amber-500/20 bg-amber-500/5 px-4 py-3">
+					<div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+						<div className="sm:pr-4">
+							<p className="text-sm font-medium text-amber-400">Encryption not enabled</p>
+							<p className="mt-0.5 text-sm text-ink-faint">
+								Secrets are stored without encryption. Enable encryption for protection
+								against volume compromise.
+							</p>
+						</div>
+						<Button
+							onClick={() => { setEncryptDialogOpen(true); setMasterKeyDisplay(null); }}
+							variant="outline"
+							className="w-full shrink-0 whitespace-nowrap sm:w-auto"
+						>
+							Enable Encryption
+						</Button>
+					</div>
+				</div>
+			)}
+
+			{/* Unlock prompt (locked stores) */}
+			{isLocked && (
+				<div className="mb-4 rounded-md border border-red-500/20 bg-red-500/5 px-4 py-3">
+					<p className="text-sm font-medium text-red-400">Secrets are locked</p>
+					<p className="mt-0.5 text-sm text-ink-faint">
+						Enter your master key to unlock encrypted secrets. You can view secret names
+						but cannot add, edit, or read values while locked.
+					</p>
+					<div className="mt-3 flex items-center gap-2">
+						<Input
+							type="password"
+							value={unlockKeyInput}
+							onChange={(e) => setUnlockKeyInput(e.target.value)}
+							placeholder="Paste master key (hex)"
+							className="max-w-sm font-mono text-tiny"
+							onKeyDown={(e) => { if (e.key === "Enter" && unlockKeyInput.trim()) unlockMutation.mutate(unlockKeyInput.trim()); }}
+						/>
+						<Button
+							onClick={() => unlockMutation.mutate(unlockKeyInput.trim())}
+							disabled={!unlockKeyInput.trim()}
+							loading={unlockMutation.isPending}
+							size="sm"
+						>
+							Unlock
+						</Button>
+					</div>
+				</div>
+			)}
+
+			{/* Feedback message */}
+			{message && (
+				<div className={`mb-4 rounded-md border px-3 py-2 text-sm ${
+					message.type === "success"
+						? "border-green-500/20 bg-green-500/10 text-green-400"
+						: "border-red-500/20 bg-red-500/10 text-red-400"
+				}`}>
+					{message.text}
+				</div>
+			)}
+
+			{/* Toolbar */}
+			<div className="mb-3 flex items-center gap-2">
+				<Input
+					value={searchQuery}
+					onChange={(e) => setSearchQuery(e.target.value)}
+					placeholder="Filter secrets..."
+					className="max-w-xs"
+				/>
+				<div className="flex gap-1">
+					{(["all", "system", "tool"] as const).map((cat) => (
+						<button
+							key={cat}
+							onClick={() => setFilterCategory(cat)}
+							className={`rounded-full px-2.5 py-1 text-tiny font-medium transition-colors ${
+								filterCategory === cat
+									? "bg-accent/15 text-accent"
+									: "text-ink-faint hover:text-ink-dull"
+							}`}
+						>
+							{cat === "all" ? "All" : cat.charAt(0).toUpperCase() + cat.slice(1)}
+						</button>
+					))}
+				</div>
+				<div className="flex-1" />
+				{canMutate && (
+					<Button onClick={handleOpenAdd} size="sm">
+						Add secret
+					</Button>
+				)}
+			</div>
+
+			{/* Secret list */}
+			{isLoading ? (
+				<div className="flex items-center gap-2 text-ink-dull">
+					<div className="h-2 w-2 animate-pulse rounded-full bg-accent" />
+					Loading secrets...
+				</div>
+			) : filteredSecrets.length === 0 ? (
+				<div className="flex flex-col items-center rounded-lg border border-dashed border-app-line py-12">
+					<p className="text-sm font-medium text-ink-dull">
+						{secrets.length === 0 ? "No secrets yet" : "No matching secrets"}
+					</p>
+					<p className="mt-1 text-sm text-ink-faint">
+						{secrets.length === 0
+							? "Add credentials for LLM providers or CLI tools."
+							: "Try a different filter."}
+					</p>
+					{secrets.length === 0 && canMutate && (
+						<div className="mt-4 flex gap-2">
+							<Button onClick={handleOpenAdd} size="sm">
+								Add secret
+							</Button>
+							<Button onClick={() => migrateMutation.mutate()} variant="outline" size="sm" loading={migrateMutation.isPending}>
+								Migrate from config
+							</Button>
+						</div>
+					)}
+				</div>
+			) : (
+				<div className="flex flex-col gap-1.5">
+					{filteredSecrets.map((secret) => (
+						<div
+							key={secret.name}
+							className="group flex items-center rounded-lg border border-app-line bg-app-box px-4 py-3"
+						>
+							<div className="flex-1 min-w-0">
+								<div className="flex items-center gap-2">
+									<code className="text-sm font-medium text-ink">{secret.name}</code>
+									<Badge
+										variant="outline"
+										size="sm"
+										className="pointer-events-none transition-none"
+									>
+										{secret.category}
+									</Badge>
+								</div>
+								<p className="mt-0.5 text-tiny text-ink-faint">
+									Updated {new Date(secret.updated_at).toLocaleDateString()}
+								</p>
+							</div>
+							{canMutate && (
+								<div className="flex gap-1.5 opacity-0 pointer-events-none group-hover:opacity-100 group-hover:pointer-events-auto group-focus-within:opacity-100 group-focus-within:pointer-events-auto">
+									<Button onClick={() => handleOpenEdit(secret)} variant="outline" size="sm">
+										Update
+									</Button>
+									<Button onClick={() => setDeleteTarget(secret.name)} variant="outline" size="sm">
+										Delete
+									</Button>
+								</div>
+							)}
+						</div>
+					))}
+				</div>
+			)}
+
+			{/* Bottom actions for encrypted stores */}
+			{storeStatus?.encrypted && !storeStatus.platform_managed && canMutate && (
+				<div className="mt-6 flex items-center gap-2 border-t border-app-line pt-4">
+					<Button onClick={() => lockMutation.mutate()} variant="outline" size="sm" loading={lockMutation.isPending}>
+						Lock store
+					</Button>
+					<Button onClick={() => setRotateDialogOpen(true)} variant="outline" size="sm">
+						Rotate master key
+					</Button>
+					<div className="flex-1" />
+					<Button onClick={() => migrateMutation.mutate()} variant="outline" size="sm" loading={migrateMutation.isPending}>
+						Migrate from config
+					</Button>
+				</div>
+			)}
+
+			{/* Migrate button for unencrypted stores */}
+			{state === "unencrypted" && secrets.length > 0 && (
+				<div className="mt-4 flex justify-end">
+					<Button onClick={() => migrateMutation.mutate()} variant="outline" size="sm" loading={migrateMutation.isPending}>
+						Migrate from config
+					</Button>
+				</div>
+			)}
+
+			{/* ── Add / Edit Dialog ─────────────────────────────────────── */}
+			<Dialog
+				open={addDialogOpen || !!editingSecret}
+				onOpenChange={(open) => {
+					if (!open) {
+						setAddDialogOpen(false);
+						setEditingSecret(null);
+						setNameInput("");
+						setValueInput("");
+					}
+				}}
+			>
+				<DialogContent className="max-w-md">
+					<DialogHeader>
+						<DialogTitle>{editingSecret ? "Update Secret" : "Add Secret"}</DialogTitle>
+						<DialogDescription>
+							{editingSecret
+								? `Enter a new value for ${editingSecret}. The existing value will be overwritten.`
+								: "Add a new credential. System secrets are internal (LLM keys, messaging tokens). Tool secrets are exposed to worker subprocesses as environment variables."}
+						</DialogDescription>
+					</DialogHeader>
+
+					{!editingSecret && (
+						<div className="space-y-1.5">
+							<label className="text-sm font-medium text-ink">Name</label>
+							<Input
+								value={nameInput}
+								onChange={(e) => setNameInput(e.target.value.toUpperCase().replace(/[^A-Z0-9_]/g, ""))}
+								placeholder="GH_TOKEN"
+								className="font-mono"
+								autoFocus
+							/>
+							<p className="text-tiny text-ink-faint">
+								UPPER_SNAKE_CASE. This is also the env var name for tool secrets.
+							</p>
+						</div>
+					)}
+
+					<div className="space-y-1.5">
+						<label className="text-sm font-medium text-ink">Value</label>
+						<Input
+							type="password"
+							value={valueInput}
+							onChange={(e) => setValueInput(e.target.value)}
+							placeholder={editingSecret ? "Enter new value" : "Secret value"}
+							autoFocus={!!editingSecret}
+							onKeyDown={(e) => { if (e.key === "Enter") handleSave(); }}
+						/>
+					</div>
+
+					<div className="space-y-1.5">
+						<label className="text-sm font-medium text-ink">Category</label>
+						<Select
+							value={categoryInput}
+							onValueChange={(value) => setCategoryInput(value as SecretCategory)}
+						>
+							<SelectTrigger>
+								<SelectValue />
+							</SelectTrigger>
+							<SelectContent>
+								<SelectItem value="tool">
+									Tool — exposed to workers as env vars
+								</SelectItem>
+								<SelectItem value="system">
+									System — internal only, never exposed
+								</SelectItem>
+							</SelectContent>
+						</Select>
+						<p className="text-tiny text-ink-faint">
+							{categoryInput === "tool"
+								? "Workers will have access to this credential via environment variable."
+								: "Only the Spacebot process can read this credential. Workers never see it."}
+						</p>
+					</div>
+
+					<DialogFooter>
+						<Button
+							onClick={() => { setAddDialogOpen(false); setEditingSecret(null); }}
+							variant="ghost"
+							size="sm"
+						>
+							Cancel
+						</Button>
+						<Button
+							onClick={handleSave}
+							disabled={(!editingSecret && !nameInput.trim()) || !valueInput}
+							loading={putMutation.isPending}
+							size="sm"
+						>
+							Save
+						</Button>
+					</DialogFooter>
+				</DialogContent>
+			</Dialog>
+
+			{/* ── Delete Confirmation ───────────────────────────────────── */}
+			<Dialog open={!!deleteTarget} onOpenChange={(open) => { if (!open) setDeleteTarget(null); }}>
+				<DialogContent className="max-w-sm">
+					<DialogHeader>
+						<DialogTitle>Delete Secret</DialogTitle>
+						<DialogDescription>
+							Are you sure you want to delete <code className="font-mono text-ink">{deleteTarget}</code>?
+							{" "}If this secret is referenced in config.toml, the reference will fail to resolve.
+						</DialogDescription>
+					</DialogHeader>
+					<DialogFooter>
+						<Button onClick={() => setDeleteTarget(null)} variant="ghost" size="sm">
+							Cancel
+						</Button>
+						<Button
+							onClick={() => { if (deleteTarget) deleteMutation.mutate(deleteTarget); }}
+							loading={deleteMutation.isPending}
+							variant="destructive"
+							size="sm"
+						>
+							Delete
+						</Button>
+					</DialogFooter>
+				</DialogContent>
+			</Dialog>
+
+			{/* ── Enable Encryption / Master Key Display Dialog ─────────── */}
+			<Dialog
+				open={encryptDialogOpen}
+				onOpenChange={(open) => {
+					if (!open) {
+						setEncryptDialogOpen(false);
+						setMasterKeyDisplay(null);
+						setMasterKeyCopied(false);
+					}
+				}}
+			>
+				<DialogContent className="max-w-md">
+					{!masterKeyDisplay ? (
+						<>
+							<DialogHeader>
+								<DialogTitle>Enable Encryption</DialogTitle>
+								<DialogDescription>
+									This will generate a master key and encrypt all secrets at rest using
+									AES-256-GCM. On Linux, you will need the master key to unlock secrets
+									after a reboot.
+								</DialogDescription>
+							</DialogHeader>
+							<DialogFooter>
+								<Button
+									onClick={() => setEncryptDialogOpen(false)}
+									variant="ghost"
+									size="sm"
+								>
+									Cancel
+								</Button>
+								<Button
+									onClick={() => encryptMutation.mutate()}
+									loading={encryptMutation.isPending}
+									size="sm"
+								>
+									Enable encryption
+								</Button>
+							</DialogFooter>
+						</>
+					) : (
+						<>
+							<DialogHeader>
+								<DialogTitle>Master Key Generated</DialogTitle>
+								<DialogDescription>
+									Save this key somewhere safe. On Linux, you will need it to unlock the
+									secret store after a reboot. This is the only time the key will be shown.
+								</DialogDescription>
+							</DialogHeader>
+							<div className="space-y-3">
+								<div className="flex items-center gap-2">
+									<code className="flex-1 rounded border border-app-line bg-app-darkerBox px-3 py-2 font-mono text-tiny text-ink break-all select-all">
+										{masterKeyDisplay}
+									</code>
+									<Button onClick={handleCopyKey} size="sm" variant={masterKeyCopied ? "secondary" : "outline"}>
+										{masterKeyCopied ? "Copied" : "Copy"}
+									</Button>
+								</div>
+								<div className="rounded-md border border-amber-500/20 bg-amber-500/5 px-3 py-2 text-sm text-amber-400">
+									If you lose this key and the OS credential store is cleared (e.g. after
+									a Linux reboot), you will not be able to access your encrypted secrets.
+								</div>
+							</div>
+							<DialogFooter>
+								<Button
+									onClick={() => {
+										setEncryptDialogOpen(false);
+										setMasterKeyDisplay(null);
+										setMasterKeyCopied(false);
+									}}
+									size="sm"
+								>
+									Done
+								</Button>
+							</DialogFooter>
+						</>
+					)}
+				</DialogContent>
+			</Dialog>
+
+			{/* ── Rotate Key Confirmation ───────────────────────────────── */}
+			<Dialog open={rotateDialogOpen} onOpenChange={(open) => { if (!open) setRotateDialogOpen(false); }}>
+				<DialogContent className="max-w-sm">
+					<DialogHeader>
+						<DialogTitle>Rotate Master Key</DialogTitle>
+						<DialogDescription>
+							This will generate a new master key and re-encrypt all secrets. Your current
+							master key will be invalidated. You will need to save the new key.
+						</DialogDescription>
+					</DialogHeader>
+					<DialogFooter>
+						<Button onClick={() => setRotateDialogOpen(false)} variant="ghost" size="sm">
+							Cancel
+						</Button>
+						<Button
+							onClick={() => rotateMutation.mutate()}
+							loading={rotateMutation.isPending}
+							size="sm"
+						>
+							Rotate key
+						</Button>
+					</DialogFooter>
+				</DialogContent>
+			</Dialog>
+		</div>
+	);
+}
 
 interface GlobalSettingsSectionProps {
 	settings: GlobalSettingsResponse | undefined;
@@ -1339,6 +2213,309 @@ function OpenCodeSection({ settings, isLoading }: GlobalSettingsSectionProps) {
 	);
 }
 
+function formatCheckedAt(checkedAt: string | null): string {
+	if (!checkedAt) return "Never";
+	const timestamp = new Date(checkedAt);
+	if (Number.isNaN(timestamp.getTime())) return checkedAt;
+	return timestamp.toLocaleString();
+}
+
+function pullableDockerImage(image: string | null): string {
+	if (!image) return "ghcr.io/spacedriveapp/spacebot:latest";
+	return image.split("@")[0] ?? image;
+}
+
+function UpdatesSection() {
+	const queryClient = useQueryClient();
+	const [message, setMessage] = useState<{ text: string; type: "success" | "error" } | null>(null);
+	const [copiedBlock, setCopiedBlock] = useState<string | null>(null);
+
+	const { data, isLoading, isFetching } = useQuery<UpdateStatus>({
+		queryKey: ["update-check"],
+		queryFn: api.updateCheck,
+		staleTime: 30_000,
+		refetchInterval: 300_000,
+	});
+
+	const checkNowMutation = useMutation({
+		mutationFn: api.updateCheckNow,
+		onSuccess: (status) => {
+			queryClient.setQueryData(["update-check"], status);
+			if (status.update_available && status.latest_version) {
+				setMessage({
+					text: `Update ${status.latest_version} is available.`,
+					type: "success",
+				});
+			} else {
+				setMessage({ text: "No newer release found.", type: "success" });
+			}
+		},
+		onError: (error) => {
+			setMessage({ text: `Failed to check updates: ${error.message}`, type: "error" });
+		},
+	});
+
+	const applyMutation = useMutation({
+		mutationFn: api.updateApply,
+		onSuccess: (result) => {
+			if (result.status === "updating") {
+				setMessage({
+					text: "Applying update. This instance will restart in a few seconds.",
+					type: "success",
+				});
+				setTimeout(() => {
+					queryClient.invalidateQueries({ queryKey: ["update-check"] });
+				}, 3000);
+				return;
+			}
+
+			setMessage({ text: result.error ?? "Update failed", type: "error" });
+		},
+		onError: (error) => {
+			setMessage({ text: `Failed to apply update: ${error.message}`, type: "error" });
+		},
+	});
+
+	const handleCopy = async (label: string, content: string) => {
+		try {
+			if (navigator.clipboard?.writeText) {
+				await navigator.clipboard.writeText(content);
+			} else {
+				const textarea = document.createElement("textarea");
+				textarea.value = content;
+				textarea.setAttribute("readonly", "");
+				textarea.style.position = "absolute";
+				textarea.style.left = "-9999px";
+				document.body.appendChild(textarea);
+				textarea.select();
+				document.execCommand("copy");
+				document.body.removeChild(textarea);
+			}
+			setCopiedBlock(label);
+			setTimeout(() => setCopiedBlock((current) => (current === label ? null : current)), 1200);
+		} catch (error: any) {
+			setMessage({ text: `Failed to copy commands: ${error.message}`, type: "error" });
+		}
+	};
+
+	const deployment = data?.deployment ?? "native";
+	const deploymentLabel = deployment === "docker"
+		? "Docker"
+		: deployment === "hosted"
+			? "Hosted"
+			: "Native";
+
+	const dockerComposeCommands = [
+		"docker compose pull spacebot",
+		"docker compose up -d --force-recreate spacebot",
+	];
+
+	const dockerRunCommands = [
+		`docker pull ${pullableDockerImage(data?.docker_image ?? null)}`,
+		"docker stop spacebot && docker rm spacebot",
+		"# re-run your docker run command",
+	];
+
+	const nativeCommands = [
+		"git pull",
+		"cargo install --path . --force",
+		"spacebot restart",
+	];
+
+	return (
+		<div className="mx-auto max-w-2xl px-6 py-6">
+			<div className="mb-6">
+				<h2 className="font-plex text-sm font-semibold text-ink">Updates</h2>
+				<p className="mt-1 text-sm text-ink-dull">
+					Check release status, trigger one-click Docker updates, and copy manual update commands.
+				</p>
+			</div>
+
+			{isLoading ? (
+				<div className="flex items-center gap-2 text-ink-dull">
+					<div className="h-2 w-2 animate-pulse rounded-full bg-accent" />
+					Loading update status...
+				</div>
+			) : (
+				<div className="flex flex-col gap-4">
+					<div className="rounded-lg border border-app-line bg-app-box p-4">
+						<div className="flex items-center justify-between gap-4">
+							<div>
+								<p className="text-sm font-medium text-ink">Release Status</p>
+								<p className="mt-0.5 text-sm text-ink-dull">
+									{data?.update_available
+										? `Update ${data.latest_version ?? ""} is available`
+										: "You're running the latest available release"}
+								</p>
+							</div>
+							<Button
+								onClick={() => {
+									setMessage(null);
+									checkNowMutation.mutate();
+								}}
+								loading={checkNowMutation.isPending || isFetching}
+								size="sm"
+								variant="outline"
+							>
+								Check now
+							</Button>
+						</div>
+
+						<div className="mt-4 grid grid-cols-2 gap-3 text-sm">
+							<div>
+								<p className="text-ink-faint">Deployment</p>
+								<p className="text-ink">{deploymentLabel}</p>
+							</div>
+							<div>
+								<p className="text-ink-faint">Current version</p>
+								<p className="text-ink">{data?.current_version ?? "Unknown"}</p>
+							</div>
+							<div>
+								<p className="text-ink-faint">Latest release</p>
+								<p className="text-ink">{data?.latest_version ?? "Unknown"}</p>
+							</div>
+							<div>
+								<p className="text-ink-faint">Last checked</p>
+								<p className="text-ink">{formatCheckedAt(data?.checked_at ?? null)}</p>
+							</div>
+						</div>
+
+						{data?.docker_image && (
+							<div className="mt-3 rounded border border-app-line/70 bg-app-darkBox/30 px-3 py-2">
+								<p className="text-tiny text-ink-faint">Container image</p>
+								<p className="font-mono text-xs text-ink">{data.docker_image}</p>
+							</div>
+						)}
+
+						{data?.release_url && (
+							<a
+								href={data.release_url}
+								target="_blank"
+								rel="noopener noreferrer"
+								className="mt-3 inline-block text-sm text-accent hover:underline"
+							>
+								View release notes
+							</a>
+						)}
+					</div>
+
+					{deployment === "docker" && (
+						<div className="rounded-lg border border-app-line bg-app-box p-4">
+							<div className="flex items-center justify-between gap-3">
+								<div>
+									<p className="text-sm font-medium text-ink">One-Click Docker Update</p>
+									<p className="mt-0.5 text-sm text-ink-dull">
+										Pull and swap to the latest release image from the web UI.
+									</p>
+								</div>
+								<Button
+									onClick={() => {
+										setMessage(null);
+										applyMutation.mutate();
+									}}
+									disabled={!data?.can_apply || !data?.update_available}
+									loading={applyMutation.isPending}
+									size="sm"
+								>
+									Update now
+								</Button>
+							</div>
+							{!data?.update_available && (
+								<p className="mt-3 text-xs text-ink-faint">No update available yet.</p>
+							)}
+							{!data?.can_apply && data?.cannot_apply_reason && (
+								<p className="mt-3 text-xs text-yellow-300">{data.cannot_apply_reason}</p>
+							)}
+							{data?.can_apply && (
+								<p className="mt-3 text-xs text-ink-faint">
+									Applying an update restarts this instance. The UI should reconnect in 10-30 seconds.
+								</p>
+							)}
+						</div>
+					)}
+
+					<div className="rounded-lg border border-app-line bg-app-box p-4">
+						<p className="text-sm font-medium text-ink">Manual Update Commands</p>
+						<p className="mt-0.5 text-sm text-ink-dull">
+							Use these when one-click update is unavailable or when you prefer manual rollouts.
+						</p>
+
+						{deployment === "docker" && (
+							<div className="mt-3 flex flex-col gap-3">
+								<div className="rounded border border-app-line/70 bg-app-darkBox/30 p-3">
+									<div className="mb-2 flex items-center justify-between">
+										<p className="text-xs font-medium uppercase tracking-wider text-ink-faint">Docker Compose</p>
+										<Button
+											onClick={() => handleCopy("compose", dockerComposeCommands.join("\n"))}
+											variant="ghost"
+											size="sm"
+										>
+											{copiedBlock === "compose" ? "Copied" : "Copy"}
+										</Button>
+									</div>
+									<pre className="overflow-x-auto text-xs text-ink"><code>{dockerComposeCommands.join("\n")}</code></pre>
+								</div>
+								<div className="rounded border border-app-line/70 bg-app-darkBox/30 p-3">
+									<div className="mb-2 flex items-center justify-between">
+										<p className="text-xs font-medium uppercase tracking-wider text-ink-faint">docker run</p>
+										<Button
+											onClick={() => handleCopy("docker-run", dockerRunCommands.join("\n"))}
+											variant="ghost"
+											size="sm"
+										>
+											{copiedBlock === "docker-run" ? "Copied" : "Copy"}
+										</Button>
+									</div>
+									<pre className="overflow-x-auto text-xs text-ink"><code>{dockerRunCommands.join("\n")}</code></pre>
+								</div>
+							</div>
+						)}
+
+						{deployment === "native" && (
+							<div className="mt-3 rounded border border-app-line/70 bg-app-darkBox/30 p-3">
+								<div className="mb-2 flex items-center justify-between">
+									<p className="text-xs font-medium uppercase tracking-wider text-ink-faint">Source Install</p>
+									<Button
+										onClick={() => handleCopy("native", nativeCommands.join("\n"))}
+										variant="ghost"
+										size="sm"
+									>
+										{copiedBlock === "native" ? "Copied" : "Copy"}
+									</Button>
+								</div>
+								<pre className="overflow-x-auto text-xs text-ink"><code>{nativeCommands.join("\n")}</code></pre>
+							</div>
+						)}
+
+						{deployment === "hosted" && (
+							<p className="mt-3 text-sm text-ink-dull">
+								Hosted instances are updated through platform rollouts.
+							</p>
+						)}
+					</div>
+
+					{data?.error && (
+						<div className="rounded-md border border-red-500/20 bg-red-500/10 px-3 py-2 text-sm text-red-400">
+							Update check error: {data.error}
+						</div>
+					)}
+				</div>
+			)}
+
+			{message && (
+				<div
+					className={`mt-4 rounded-md border px-3 py-2 text-sm ${message.type === "success"
+							? "border-green-500/20 bg-green-500/10 text-green-400"
+							: "border-red-500/20 bg-red-500/10 text-red-400"
+						}`}
+				>
+					{message.text}
+				</div>
+			)}
+		</div>
+	);
+}
+
 function ConfigFileSection() {
 	const queryClient = useQueryClient();
 	const editorRef = useRef<HTMLDivElement>(null);
@@ -1556,9 +2733,24 @@ interface ProviderCardProps {
 	onEdit: () => void;
 	onRemove: () => void;
 	removing: boolean;
+	actionLabel?: string;
+	showRemove?: boolean;
 }
 
-function ProviderCard({ provider, name, description, configured, defaultModel, onEdit, onRemove, removing }: ProviderCardProps) {
+function ProviderCard({
+	provider,
+	name,
+	description,
+	configured,
+	defaultModel,
+	onEdit,
+	onRemove,
+	removing,
+	actionLabel,
+	showRemove,
+}: ProviderCardProps) {
+	const primaryLabel = actionLabel ?? (configured ? "Update" : "Add key");
+	const shouldShowRemove = showRemove ?? configured;
 	return (
 		<div className="rounded-lg border border-app-line bg-app-box p-4">
 			<div className="flex items-center gap-3">
@@ -1580,9 +2772,9 @@ function ProviderCard({ provider, name, description, configured, defaultModel, o
 				</div>
 				<div className="flex gap-2">
 					<Button onClick={onEdit} variant="outline" size="sm">
-						{configured ? "Update" : "Add key"}
+						{primaryLabel}
 					</Button>
-					{configured && (
+					{shouldShowRemove && (
 						<Button onClick={onRemove} variant="outline" size="sm" loading={removing}>
 							Remove
 						</Button>
@@ -1593,53 +2785,160 @@ function ProviderCard({ provider, name, description, configured, defaultModel, o
 	);
 }
 
-interface ChatGptOAuthCardProps {
-	configured: boolean;
-	defaultModel: string;
+interface ChatGptOAuthDialogProps {
+	open: boolean;
+	onOpenChange: (open: boolean) => void;
+	isRequesting: boolean;
 	isPolling: boolean;
 	message: { text: string; type: "success" | "error" } | null;
-	onSignIn: () => void;
+	deviceCodeInfo: { userCode: string; verificationUrl: string } | null;
+	deviceCodeCopied: boolean;
+	onCopyDeviceCode: () => void;
+	onOpenDeviceLogin: () => void;
+	onRestart: () => void;
 }
 
-function ChatGptOAuthCard({ configured, defaultModel, isPolling, message, onSignIn }: ChatGptOAuthCardProps) {
+function ChatGptOAuthDialog({
+	open,
+	onOpenChange,
+	isRequesting,
+	isPolling,
+	message,
+	deviceCodeInfo,
+	deviceCodeCopied,
+	onCopyDeviceCode,
+	onOpenDeviceLogin,
+	onRestart,
+}: ChatGptOAuthDialogProps) {
 	return (
-		<div className="rounded-lg border border-app-line bg-app-box p-4">
-			<div className="flex items-center gap-3">
-				<ProviderIcon provider="openai-chatgpt" size={32} />
-				<div className="flex-1">
-					<div className="flex items-center gap-2">
-						<span className="text-sm font-medium text-ink">ChatGPT Plus (OAuth)</span>
-						{configured && (
-							<span className="inline-flex items-center">
-								<span className="h-2 w-2 rounded-full bg-green-400" aria-hidden="true" />
-								<span className="sr-only">Configured</span>
-							</span>
-						)}
-					</div>
-					<p className="mt-0.5 text-sm text-ink-dull">
-						Sign in with your ChatGPT Plus account in the browser.
-					</p>
-					<p className="mt-1 text-tiny text-ink-faint">
-						Default model: <span className="text-ink-dull">{defaultModel}</span>
-					</p>
-					{message && (
-						<p className={`mt-1 text-tiny ${message.type === "success" ? "text-green-400" : "text-red-400"}`}>
-							{message.text}
-						</p>
-					)}
-				</div>
-				<div className="flex gap-2">
-					<Button
-						onClick={onSignIn}
-						disabled={isPolling}
-						loading={isPolling}
-						variant="outline"
-						size="sm"
-					>
+		<Dialog open={open} onOpenChange={onOpenChange}>
+			<DialogContent className="max-w-md">
+				<DialogHeader>
+					<DialogTitle className="flex items-center gap-2">
+						<ProviderIcon provider="openai-chatgpt" size={20} />
 						Sign in with ChatGPT Plus
-					</Button>
+					</DialogTitle>
+					{!message && (
+						<DialogDescription>
+							Copy the device code below, then sign in to your OpenAI account to authorize access.
+							You must first <a href="https://chatgpt.com/security-settings" target="_blank" rel="noopener noreferrer" className="underline text-accent hover:text-accent/80">enable device code login</a> in your ChatGPT security settings.
+						</DialogDescription>
+					)}
+				</DialogHeader>
+
+				<div className="space-y-4">
+					{message && !deviceCodeInfo ? (
+						/* Completed state — success or error with no active flow */
+						<div
+							className={`rounded-md border px-3 py-2 text-sm ${message.type === "success"
+								? "border-green-500/20 bg-green-500/10 text-green-400"
+								: "border-red-500/20 bg-red-500/10 text-red-400"
+							}`}
+						>
+							{message.text}
+						</div>
+					) : isRequesting && !deviceCodeInfo ? (
+						<div className="flex items-center gap-2 text-sm text-ink-dull">
+							<div className="h-2 w-2 animate-pulse rounded-full bg-accent" />
+							Requesting device code...
+						</div>
+					) : deviceCodeInfo ? (
+						<div className="space-y-4">
+							<div className="rounded-md border border-app-line p-3">
+								<div className="flex items-center gap-2">
+									<span className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-accent/15 text-[11px] font-semibold text-accent">1</span>
+									<p className="text-sm text-ink-dull">Copy this device code</p>
+								</div>
+								<div className="mt-2.5 flex items-center gap-2 pl-7">
+									<code className="rounded border border-app-line bg-app-darkerBox px-3 py-1.5 font-mono text-base tracking-widest text-ink">
+										{deviceCodeInfo.userCode}
+									</code>
+									<Button onClick={onCopyDeviceCode} size="sm" variant={deviceCodeCopied ? "secondary" : "outline"}>
+										{deviceCodeCopied ? "Copied" : "Copy"}
+									</Button>
+								</div>
+							</div>
+
+							<div className={`rounded-md border border-app-line p-3 ${!deviceCodeCopied ? "opacity-50" : ""}`}>
+								<div className="flex items-center gap-2">
+									<span className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-accent/15 text-[11px] font-semibold text-accent">2</span>
+									<p className="text-sm text-ink-dull">Open OpenAI and paste the code</p>
+								</div>
+								<div className="mt-2.5 pl-7">
+									<Button
+										onClick={onOpenDeviceLogin}
+										disabled={!deviceCodeCopied}
+										size="sm"
+										variant="outline"
+									>
+										Open login page
+									</Button>
+								</div>
+							</div>
+
+							{isPolling && !message && (
+								<div className="flex items-center gap-2 text-sm text-ink-faint">
+									<div className="h-2 w-2 animate-pulse rounded-full bg-accent" />
+									Waiting for sign-in confirmation...
+								</div>
+							)}
+
+							{message && (
+								<div
+									className={`rounded-md border px-3 py-2 text-sm ${message.type === "success"
+										? "border-green-500/20 bg-green-500/10 text-green-400"
+										: "border-red-500/20 bg-red-500/10 text-red-400"
+									}`}
+								>
+									{message.text}
+								</div>
+							)}
+						</div>
+					) : null}
 				</div>
-			</div>
-		</div>
+
+				<DialogFooter>
+					{message && !deviceCodeInfo ? (
+						/* Completed — show Done (or Retry for errors) */
+						message.type === "success" ? (
+							<Button onClick={() => onOpenChange(false)} size="sm">
+								Done
+							</Button>
+						) : (
+							<>
+								<Button onClick={() => onOpenChange(false)} variant="ghost" size="sm">
+									Close
+								</Button>
+								<Button
+									onClick={onRestart}
+									disabled={isRequesting}
+									loading={isRequesting}
+									size="sm"
+								>
+									Try again
+								</Button>
+							</>
+						)
+					) : (
+						<>
+							<Button onClick={() => onOpenChange(false)} variant="ghost" size="sm">
+								Cancel
+							</Button>
+							{deviceCodeInfo && (
+								<Button
+									onClick={onRestart}
+									disabled={isRequesting}
+									loading={isRequesting}
+									variant="outline"
+									size="sm"
+								>
+									Get new code
+								</Button>
+							)}
+						</>
+					)}
+				</DialogFooter>
+			</DialogContent>
+		</Dialog>
 	);
 }

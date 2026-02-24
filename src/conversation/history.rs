@@ -71,6 +71,15 @@ impl ConversationLogger {
 
     /// Log a bot (assistant) message. Fire-and-forget.
     pub fn log_bot_message(&self, channel_id: &ChannelId, content: &str) {
+        self.log_bot_message_with_name(channel_id, content, None);
+    }
+
+    /// Log a system message (e.g. task delegation audit record). Fire-and-forget.
+    ///
+    /// System messages are persisted with role `"system"` and are not fed to any
+    /// LLM context window. They exist purely for UI display in link channel
+    /// timelines and audit logs.
+    pub fn log_system_message(&self, channel_id: &str, content: &str) {
         let pool = self.pool.clone();
         let id = uuid::Uuid::new_v4().to_string();
         let channel_id = channel_id.to_string();
@@ -78,11 +87,41 @@ impl ConversationLogger {
 
         tokio::spawn(async move {
             if let Err(error) = sqlx::query(
-                "INSERT INTO conversation_messages (id, channel_id, role, content) \
-                 VALUES (?, ?, 'assistant', ?)",
+                "INSERT INTO conversation_messages (id, channel_id, role, sender_name, content) \
+                 VALUES (?, ?, 'system', 'system', ?)",
             )
             .bind(&id)
             .bind(&channel_id)
+            .bind(&content)
+            .execute(&pool)
+            .await
+            {
+                tracing::warn!(%error, %channel_id, "failed to persist system message");
+            }
+        });
+    }
+
+    /// Log a bot (assistant) message with an agent display name. Fire-and-forget.
+    pub fn log_bot_message_with_name(
+        &self,
+        channel_id: &ChannelId,
+        content: &str,
+        sender_name: Option<&str>,
+    ) {
+        let pool = self.pool.clone();
+        let id = uuid::Uuid::new_v4().to_string();
+        let channel_id = channel_id.to_string();
+        let content = content.to_string();
+        let sender_name = sender_name.map(String::from);
+
+        tokio::spawn(async move {
+            if let Err(error) = sqlx::query(
+                "INSERT INTO conversation_messages (id, channel_id, role, sender_name, content) \
+                 VALUES (?, ?, 'assistant', ?, ?)",
+            )
+            .bind(&id)
+            .bind(&channel_id)
+            .bind(&sender_name)
             .bind(&content)
             .execute(&pool)
             .await
@@ -133,24 +172,52 @@ impl ConversationLogger {
         Ok(messages)
     }
 
-    /// Load recent messages from any channel (not just the current one).
+    /// Load messages from any channel (not just the current one).
+    ///
+    /// Supports optional temporal filtering via `before` and `after` (RFC 3339 strings)
+    /// and ordering via `oldest_first`. When `oldest_first` is true, returns the earliest
+    /// matching messages instead of the most recent.
     pub async fn load_channel_transcript(
         &self,
         channel_id: &str,
         limit: i64,
+        before: Option<&str>,
+        after: Option<&str>,
+        oldest_first: bool,
     ) -> crate::error::Result<Vec<ConversationMessage>> {
-        let rows = sqlx::query(
+        let mut sql = String::from(
             "SELECT id, channel_id, role, sender_name, sender_id, content, metadata, created_at \
              FROM conversation_messages \
-             WHERE channel_id = ? \
-             ORDER BY created_at DESC \
-             LIMIT ?",
-        )
-        .bind(channel_id)
-        .bind(limit)
-        .fetch_all(&self.pool)
-        .await
-        .map_err(|e| anyhow::anyhow!(e))?;
+             WHERE channel_id = ?",
+        );
+
+        if before.is_some() {
+            sql.push_str(" AND created_at < ?");
+        }
+        if after.is_some() {
+            sql.push_str(" AND created_at > ?");
+        }
+
+        if oldest_first {
+            sql.push_str(" ORDER BY created_at ASC");
+        } else {
+            sql.push_str(" ORDER BY created_at DESC");
+        }
+        sql.push_str(" LIMIT ?");
+
+        let mut query = sqlx::query(&sql).bind(channel_id);
+        if let Some(before) = before {
+            query = query.bind(before);
+        }
+        if let Some(after) = after {
+            query = query.bind(after);
+        }
+        query = query.bind(limit);
+
+        let rows = query
+            .fetch_all(&self.pool)
+            .await
+            .map_err(|e| anyhow::anyhow!(e))?;
 
         let mut messages: Vec<ConversationMessage> = rows
             .into_iter()
@@ -168,7 +235,10 @@ impl ConversationLogger {
             })
             .collect();
 
-        messages.reverse();
+        // When fetching newest-first, reverse to chronological for the caller
+        if !oldest_first {
+            messages.reverse();
+        }
         Ok(messages)
     }
 }
@@ -268,19 +338,28 @@ impl ProcessRunLogger {
         channel_id: Option<&ChannelId>,
         worker_id: WorkerId,
         task: &str,
+        worker_type: &str,
+        agent_id: &crate::AgentId,
+        interactive: bool,
     ) {
         let pool = self.pool.clone();
         let id = worker_id.to_string();
         let channel_id = channel_id.map(|c| c.to_string());
         let task = task.to_string();
+        let worker_type = worker_type.to_string();
+        let agent_id = agent_id.to_string();
 
         tokio::spawn(async move {
             if let Err(error) = sqlx::query(
-                "INSERT OR IGNORE INTO worker_runs (id, channel_id, task) VALUES (?, ?, ?)",
+                "INSERT OR IGNORE INTO worker_runs (id, channel_id, task, worker_type, agent_id, interactive) \
+                 VALUES (?, ?, ?, ?, ?, ?)",
             )
             .bind(&id)
             .bind(&channel_id)
             .bind(&task)
+            .bind(&worker_type)
+            .bind(&agent_id)
+            .bind(interactive)
             .execute(&pool)
             .await
             {
@@ -290,34 +369,68 @@ impl ProcessRunLogger {
     }
 
     /// Update a worker's status. Fire-and-forget.
+    /// Most status text updates are transient — they're available via the
+    /// in-memory StatusBlock for live workers and don't need to be persisted.
+    /// The `status` column is reserved for the state enum (running/idle/done/failed).
+    ///
+    /// The one exception: when an idle worker resumes (status contains
+    /// "processing follow-up" or similar active-work indicators), we persist
+    /// `running` to the DB so the frontend doesn't show stale "idle" state.
     pub fn log_worker_status(&self, worker_id: WorkerId, status: &str) {
+        // Detect when an idle worker resumes active work and persist the
+        // transition. All other status text is transient.
+        if status.starts_with("processing") || status == "running" {
+            self.log_worker_resumed(worker_id);
+        }
+    }
+
+    /// Mark an interactive worker as idle (waiting for follow-up input).
+    /// Persisted so the frontend shows "idle" instead of "running".
+    pub fn log_worker_idle(&self, worker_id: WorkerId) {
         let pool = self.pool.clone();
         let id = worker_id.to_string();
-        let status = status.to_string();
 
         tokio::spawn(async move {
-            if let Err(error) = sqlx::query("UPDATE worker_runs SET status = ? WHERE id = ?")
-                .bind(&status)
+            if let Err(error) = sqlx::query("UPDATE worker_runs SET status = 'idle' WHERE id = ?")
                 .bind(&id)
                 .execute(&pool)
                 .await
             {
-                tracing::warn!(%error, worker_id = %id, "failed to persist worker status");
+                tracing::warn!(%error, worker_id = %id, "failed to persist worker idle state");
+            }
+        });
+    }
+
+    /// Mark an idle worker as running again (follow-up received).
+    pub fn log_worker_resumed(&self, worker_id: WorkerId) {
+        let pool = self.pool.clone();
+        let id = worker_id.to_string();
+
+        tokio::spawn(async move {
+            if let Err(error) =
+                sqlx::query("UPDATE worker_runs SET status = 'running' WHERE id = ?")
+                    .bind(&id)
+                    .execute(&pool)
+                    .await
+            {
+                tracing::warn!(%error, worker_id = %id, "failed to persist worker resumed state");
             }
         });
     }
 
     /// Record a worker completing with its result. Fire-and-forget.
-    pub fn log_worker_completed(&self, worker_id: WorkerId, result: &str) {
+    pub fn log_worker_completed(&self, worker_id: WorkerId, result: &str, success: bool) {
         let pool = self.pool.clone();
         let id = worker_id.to_string();
         let result = result.to_string();
+        let status = if success { "done" } else { "failed" };
 
         tokio::spawn(async move {
             if let Err(error) = sqlx::query(
-                "UPDATE worker_runs SET result = ?, status = 'done', completed_at = CURRENT_TIMESTAMP WHERE id = ?"
+                "UPDATE worker_runs SET result = ?, status = ?, completed_at = CURRENT_TIMESTAMP WHERE id = ?"
             )
             .bind(&result)
+            .bind(status)
             .bind(&id)
             .execute(&pool)
             .await
@@ -325,6 +438,111 @@ impl ProcessRunLogger {
                 tracing::warn!(%error, worker_id = %id, "failed to persist worker completion");
             }
         });
+    }
+
+    /// Record OpenCode session metadata on a worker run. Fire-and-forget.
+    ///
+    /// Stores the session ID and server port so the frontend can construct
+    /// an iframe URL to the embedded OpenCode web UI.
+    pub fn log_opencode_metadata(&self, worker_id: WorkerId, session_id: &str, port: u16) {
+        let pool = self.pool.clone();
+        let id = worker_id.to_string();
+        let session_id = session_id.to_string();
+
+        tokio::spawn(async move {
+            if let Err(error) = sqlx::query(
+                "UPDATE worker_runs SET opencode_session_id = ?, opencode_port = ? WHERE id = ?",
+            )
+            .bind(&session_id)
+            .bind(port as i32)
+            .bind(&id)
+            .execute(&pool)
+            .await
+            {
+                tracing::warn!(%error, worker_id = %id, "failed to persist OpenCode metadata");
+            }
+        });
+    }
+
+    /// Mark all orphaned running/idle workers as failed for an agent.
+    ///
+    /// Called at startup to reconcile rows that were left in `running` or `idle`
+    /// when the process exited before a `WorkerComplete` event was persisted.
+    pub async fn reconcile_running_workers_for_agent(
+        &self,
+        agent_id: &str,
+        failure_message: &str,
+    ) -> crate::error::Result<u64> {
+        let result = sqlx::query(
+            "UPDATE worker_runs \
+             SET status = 'failed', \
+                 completed_at = COALESCE(completed_at, CURRENT_TIMESTAMP), \
+                 result = CASE \
+                     WHEN result IS NULL OR result = '' THEN ? \
+                     ELSE result \
+                 END \
+             WHERE status IN ('running', 'idle') AND (agent_id = ? OR agent_id IS NULL)",
+        )
+        .bind(failure_message)
+        .bind(agent_id)
+        .execute(&self.pool)
+        .await
+        .map_err(|error| anyhow::anyhow!(error))?;
+
+        Ok(result.rows_affected())
+    }
+
+    /// Mark a detached running worker as cancelled.
+    ///
+    /// Used by API cancellation when the in-memory channel state no longer has
+    /// a live handle for this worker (for example after restart).
+    pub async fn cancel_running_worker(
+        &self,
+        channel_id: &str,
+        worker_id: WorkerId,
+    ) -> crate::error::Result<bool> {
+        let result = sqlx::query(
+            "UPDATE worker_runs \
+             SET result = CASE \
+                     WHEN result IS NULL OR result = '' THEN 'Worker cancelled' \
+                     ELSE result \
+                 END, \
+                 status = 'failed', \
+                 completed_at = COALESCE(completed_at, CURRENT_TIMESTAMP) \
+             WHERE id = ? AND channel_id = ? AND status = 'running'",
+        )
+        .bind(worker_id.to_string())
+        .bind(channel_id)
+        .execute(&self.pool)
+        .await
+        .map_err(|error| anyhow::anyhow!(error))?;
+
+        Ok(result.rows_affected() > 0)
+    }
+
+    /// Mark a detached running worker (`channel_id IS NULL`) as cancelled.
+    ///
+    /// Used by API cancellation fallback when no in-memory channel state exists.
+    pub async fn cancel_running_detached_worker(
+        &self,
+        worker_id: WorkerId,
+    ) -> crate::error::Result<bool> {
+        let result = sqlx::query(
+            "UPDATE worker_runs \
+             SET result = CASE \
+                     WHEN result IS NULL OR result = '' THEN 'Worker cancelled' \
+                     ELSE result \
+                 END, \
+                 status = 'failed', \
+                 completed_at = COALESCE(completed_at, CURRENT_TIMESTAMP) \
+             WHERE id = ? AND channel_id IS NULL AND status = 'running'",
+        )
+        .bind(worker_id.to_string())
+        .execute(&self.pool)
+        .await
+        .map_err(|error| anyhow::anyhow!(error))?;
+
+        Ok(result.rows_affected() > 0)
     }
 
     /// Load a unified timeline for a channel: messages, branch runs, and worker runs
@@ -339,7 +557,7 @@ impl ProcessRunLogger {
         before: Option<&str>,
     ) -> crate::error::Result<Vec<TimelineItem>> {
         let before_clause = if before.is_some() {
-            "AND timestamp < ?3"
+            "AND datetime(timestamp) < datetime(?3)"
         } else {
             ""
         };
@@ -425,5 +643,261 @@ impl ProcessRunLogger {
         // Reverse to chronological order
         items.reverse();
         Ok(items)
+    }
+
+    /// List worker runs for an agent, ordered by most recent first.
+    /// Does NOT include the transcript blob — that's fetched separately via `get_worker_detail`.
+    pub async fn list_worker_runs(
+        &self,
+        agent_id: &str,
+        limit: i64,
+        offset: i64,
+        status_filter: Option<&str>,
+    ) -> crate::error::Result<(Vec<WorkerRunRow>, i64)> {
+        let (count_where_clause, list_where_clause, has_status_filter) = if status_filter.is_some()
+        {
+            (
+                "WHERE w.agent_id = ?1 AND w.status = ?2",
+                "WHERE w.agent_id = ?1 AND w.status = ?4",
+                true,
+            )
+        } else {
+            ("WHERE w.agent_id = ?1", "WHERE w.agent_id = ?1", false)
+        };
+
+        let count_query =
+            format!("SELECT COUNT(*) as total FROM worker_runs w {count_where_clause}");
+        let list_query = format!(
+            "SELECT w.id, w.task, w.status, w.worker_type, w.channel_id, w.started_at, \
+                    w.completed_at, w.transcript IS NOT NULL as has_transcript, \
+                    w.tool_calls, w.opencode_port, w.interactive, \
+                    c.display_name as channel_name \
+             FROM worker_runs w \
+             LEFT JOIN channels c ON w.channel_id = c.id \
+             {list_where_clause} \
+             ORDER BY w.started_at DESC \
+             LIMIT ?2 OFFSET ?3"
+        );
+
+        let mut count_q = sqlx::query(&count_query).bind(agent_id);
+        let mut list_q = sqlx::query(&list_query)
+            .bind(agent_id)
+            .bind(limit)
+            .bind(offset);
+
+        if has_status_filter {
+            let filter = status_filter.unwrap_or("");
+            count_q = count_q.bind(filter);
+            list_q = list_q.bind(filter);
+        }
+
+        let total: i64 = count_q
+            .fetch_one(&self.pool)
+            .await
+            .map(|row| row.try_get("total").unwrap_or(0))
+            .map_err(|e| anyhow::anyhow!(e))?;
+
+        let rows = list_q
+            .fetch_all(&self.pool)
+            .await
+            .map_err(|e| anyhow::anyhow!(e))?;
+
+        let items = rows
+            .into_iter()
+            .map(|row| WorkerRunRow {
+                id: row.try_get("id").unwrap_or_default(),
+                task: row.try_get("task").unwrap_or_default(),
+                status: row.try_get("status").unwrap_or_default(),
+                worker_type: row
+                    .try_get("worker_type")
+                    .unwrap_or_else(|_| "builtin".into()),
+                channel_id: row.try_get("channel_id").ok(),
+                channel_name: row.try_get("channel_name").ok(),
+                started_at: row
+                    .try_get::<chrono::DateTime<chrono::Utc>, _>("started_at")
+                    .map(|t| t.to_rfc3339())
+                    .unwrap_or_default(),
+                completed_at: row
+                    .try_get::<chrono::DateTime<chrono::Utc>, _>("completed_at")
+                    .ok()
+                    .map(|t| t.to_rfc3339()),
+                has_transcript: row.try_get::<bool, _>("has_transcript").unwrap_or(false),
+                tool_calls: row.try_get::<i64, _>("tool_calls").unwrap_or(0),
+                opencode_port: row.try_get::<i32, _>("opencode_port").ok(),
+                interactive: row.try_get::<bool, _>("interactive").unwrap_or(false),
+            })
+            .collect();
+
+        Ok((items, total))
+    }
+
+    /// Get full detail for a single worker run, including the compressed transcript blob.
+    pub async fn get_worker_detail(
+        &self,
+        agent_id: &str,
+        worker_id: &str,
+    ) -> crate::error::Result<Option<WorkerDetailRow>> {
+        let row = sqlx::query(
+            "SELECT w.id, w.task, w.result, w.status, w.worker_type, w.channel_id, \
+                    w.started_at, w.completed_at, w.transcript, w.tool_calls, \
+                    w.opencode_session_id, w.opencode_port, w.interactive, \
+                    c.display_name as channel_name \
+             FROM worker_runs w \
+             LEFT JOIN channels c ON w.channel_id = c.id \
+             WHERE w.agent_id = ? AND w.id = ?",
+        )
+        .bind(agent_id)
+        .bind(worker_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| anyhow::anyhow!(e))?;
+
+        Ok(row.map(|row| WorkerDetailRow {
+            id: row.try_get("id").unwrap_or_default(),
+            task: row.try_get("task").unwrap_or_default(),
+            result: row.try_get("result").ok(),
+            status: row.try_get("status").unwrap_or_default(),
+            worker_type: row
+                .try_get("worker_type")
+                .unwrap_or_else(|_| "builtin".into()),
+            channel_id: row.try_get("channel_id").ok(),
+            channel_name: row.try_get("channel_name").ok(),
+            started_at: row
+                .try_get::<chrono::DateTime<chrono::Utc>, _>("started_at")
+                .map(|t| t.to_rfc3339())
+                .unwrap_or_default(),
+            completed_at: row
+                .try_get::<chrono::DateTime<chrono::Utc>, _>("completed_at")
+                .ok()
+                .map(|t| t.to_rfc3339()),
+            transcript_blob: row.try_get("transcript").ok(),
+            tool_calls: row.try_get::<i64, _>("tool_calls").unwrap_or(0),
+            opencode_session_id: row.try_get("opencode_session_id").ok(),
+            opencode_port: row.try_get::<i32, _>("opencode_port").ok(),
+            interactive: row.try_get::<bool, _>("interactive").unwrap_or(false),
+        }))
+    }
+}
+
+/// A worker run row without the transcript blob (for list queries).
+#[derive(Debug, Clone, Serialize)]
+pub struct WorkerRunRow {
+    pub id: String,
+    pub task: String,
+    pub status: String,
+    pub worker_type: String,
+    pub channel_id: Option<String>,
+    pub channel_name: Option<String>,
+    pub started_at: String,
+    pub completed_at: Option<String>,
+    pub has_transcript: bool,
+    pub tool_calls: i64,
+    pub opencode_port: Option<i32>,
+    pub interactive: bool,
+}
+
+/// A worker run row with full detail including the transcript blob.
+#[derive(Debug, Clone)]
+pub struct WorkerDetailRow {
+    pub id: String,
+    pub task: String,
+    pub result: Option<String>,
+    pub status: String,
+    pub worker_type: String,
+    pub channel_id: Option<String>,
+    pub channel_name: Option<String>,
+    pub started_at: String,
+    pub completed_at: Option<String>,
+    pub transcript_blob: Option<Vec<u8>>,
+    pub tool_calls: i64,
+    pub opencode_session_id: Option<String>,
+    pub opencode_port: Option<i32>,
+    pub interactive: bool,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ProcessRunLogger;
+
+    async fn setup_worker_runs_table() -> sqlx::SqlitePool {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .expect("failed to create sqlite memory pool");
+
+        sqlx::query(
+            "CREATE TABLE worker_runs (
+                id TEXT PRIMARY KEY,
+                channel_id TEXT,
+                status TEXT NOT NULL,
+                result TEXT,
+                completed_at TIMESTAMP
+            )",
+        )
+        .execute(&pool)
+        .await
+        .expect("failed to create worker_runs table");
+
+        pool
+    }
+
+    #[tokio::test]
+    async fn cancel_running_detached_worker_updates_null_channel_rows() {
+        let pool = setup_worker_runs_table().await;
+        let logger = ProcessRunLogger::new(pool.clone());
+        let worker_id = uuid::Uuid::new_v4();
+
+        sqlx::query("INSERT INTO worker_runs (id, channel_id, status, result) VALUES (?, NULL, 'running', '')")
+            .bind(worker_id.to_string())
+            .execute(&pool)
+            .await
+            .expect("failed to insert detached worker row");
+
+        let cancelled = logger
+            .cancel_running_detached_worker(worker_id)
+            .await
+            .expect("cancel should succeed");
+        assert!(cancelled);
+
+        let row = sqlx::query("SELECT status, result FROM worker_runs WHERE id = ?")
+            .bind(worker_id.to_string())
+            .fetch_one(&pool)
+            .await
+            .expect("failed to fetch worker row");
+
+        let status: String = sqlx::Row::try_get(&row, "status").expect("missing status");
+        let result: String = sqlx::Row::try_get(&row, "result").expect("missing result");
+        assert_eq!(status, "failed");
+        assert_eq!(result, "Worker cancelled");
+    }
+
+    #[tokio::test]
+    async fn cancel_running_detached_worker_does_not_touch_channel_bound_rows() {
+        let pool = setup_worker_runs_table().await;
+        let logger = ProcessRunLogger::new(pool.clone());
+        let worker_id = uuid::Uuid::new_v4();
+
+        sqlx::query(
+            "INSERT INTO worker_runs (id, channel_id, status, result) VALUES (?, 'channel-1', 'running', '')",
+        )
+        .bind(worker_id.to_string())
+        .execute(&pool)
+        .await
+        .expect("failed to insert channel worker row");
+
+        let cancelled = logger
+            .cancel_running_detached_worker(worker_id)
+            .await
+            .expect("cancel should not error");
+        assert!(!cancelled);
+
+        let row = sqlx::query("SELECT status FROM worker_runs WHERE id = ?")
+            .bind(worker_id.to_string())
+            .fetch_one(&pool)
+            .await
+            .expect("failed to fetch worker row");
+        let status: String = sqlx::Row::try_get(&row, "status").expect("missing status");
+        assert_eq!(status, "running");
     }
 }

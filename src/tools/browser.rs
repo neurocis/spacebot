@@ -6,6 +6,7 @@
 
 use crate::config::BrowserConfig;
 use chromiumoxide::browser::{Browser, BrowserConfig as ChromeConfig};
+use chromiumoxide::fetcher::{BrowserFetcher, BrowserFetcherOptions};
 use chromiumoxide::page::ScreenshotParams;
 use chromiumoxide_cdp::cdp::browser_protocol::accessibility::{
     EnableParams as AxEnableParams, GetFullAxTreeParams,
@@ -22,7 +23,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
@@ -124,6 +125,17 @@ fn is_v4_mapped_blocked(ip: Ipv6Addr) -> bool {
     }
 }
 
+/// Opaque handle to shared browser state that persists across worker lifetimes.
+///
+/// Held by `RuntimeConfig` when `persist_session = true`. All workers for the
+/// same agent clone this handle and share a single browser process / tab set.
+pub type SharedBrowserHandle = Arc<Mutex<BrowserState>>;
+
+/// Create a new shared browser handle for use in `RuntimeConfig`.
+pub fn new_shared_browser_handle() -> SharedBrowserHandle {
+    Arc::new(Mutex::new(BrowserState::new()))
+}
+
 /// Tool for browser automation (worker-only).
 #[derive(Debug, Clone)]
 pub struct BrowserTool {
@@ -132,8 +144,12 @@ pub struct BrowserTool {
     screenshot_dir: PathBuf,
 }
 
-/// Internal browser state managed across tool invocations within a single worker.
-struct BrowserState {
+/// Internal browser state managed across tool invocations.
+///
+/// When `persist_session` is enabled this struct lives in `RuntimeConfig` (via
+/// `SharedBrowserHandle`) and is shared across worker lifetimes. Otherwise each
+/// `BrowserTool` owns its own instance.
+pub struct BrowserState {
     browser: Option<Browser>,
     /// Background task driving the CDP WebSocket handler.
     _handler_task: Option<JoinHandle<()>>,
@@ -145,6 +161,48 @@ struct BrowserState {
     element_refs: HashMap<String, ElementRef>,
     /// Counter for generating element refs.
     next_ref: usize,
+    /// Per-launch temp directory for Chrome's user data. Cleaned up on drop to
+    /// prevent stale singleton locks from blocking subsequent launches.
+    user_data_dir: Option<PathBuf>,
+}
+
+impl BrowserState {
+    fn new() -> Self {
+        Self {
+            browser: None,
+            _handler_task: None,
+            pages: HashMap::new(),
+            active_target: None,
+            element_refs: HashMap::new(),
+            next_ref: 0,
+            user_data_dir: None,
+        }
+    }
+}
+
+impl Drop for BrowserState {
+    fn drop(&mut self) {
+        // Browser and handler task are dropped automatically —
+        // chromiumoxide's Child has kill_on_drop(true).
+        if let Some(dir) = self.user_data_dir.take() {
+            // Offload sync fs cleanup to a blocking thread so we don't stall
+            // the tokio worker that's dropping this state.
+            if let Ok(handle) = tokio::runtime::Handle::try_current() {
+                handle.spawn_blocking(move || {
+                    if let Err(error) = std::fs::remove_dir_all(&dir) {
+                        tracing::debug!(
+                            path = %dir.display(),
+                            %error,
+                            "failed to clean up browser user data dir"
+                        );
+                    }
+                });
+            } else {
+                // Dropped outside a tokio runtime (unlikely) — clean up inline.
+                let _ = std::fs::remove_dir_all(&dir);
+            }
+        }
+    }
 }
 
 impl std::fmt::Debug for BrowserState {
@@ -171,16 +229,27 @@ struct ElementRef {
 }
 
 impl BrowserTool {
+    /// Create a tool with its own isolated browser state (default, non-persistent).
     pub fn new(config: BrowserConfig, screenshot_dir: PathBuf) -> Self {
         Self {
-            state: Arc::new(Mutex::new(BrowserState {
-                browser: None,
-                _handler_task: None,
-                pages: HashMap::new(),
-                active_target: None,
-                element_refs: HashMap::new(),
-                next_ref: 0,
-            })),
+            state: Arc::new(Mutex::new(BrowserState::new())),
+            config,
+            screenshot_dir,
+        }
+    }
+
+    /// Create a tool backed by a shared browser state handle.
+    ///
+    /// Used when `persist_session = true`. Multiple workers share the same
+    /// `SharedBrowserHandle`, so the browser process and tabs survive across
+    /// worker lifetimes.
+    pub fn new_shared(
+        shared_state: SharedBrowserHandle,
+        config: BrowserConfig,
+        screenshot_dir: PathBuf,
+    ) -> Self {
+        Self {
+            state: shared_state,
             config,
             screenshot_dir,
         }
@@ -466,20 +535,37 @@ impl Tool for BrowserTool {
 
 impl BrowserTool {
     async fn handle_launch(&self) -> Result<BrowserOutput, BrowserError> {
-        let mut state = self.state.lock().await;
-
-        if state.browser.is_some() {
-            return Ok(BrowserOutput::success("Browser already running"));
+        // Quick check under the lock — if a browser is already running and
+        // we're in persistent mode, reconnect to existing tabs.
+        {
+            let mut state = self.state.lock().await;
+            if state.browser.is_some() {
+                if self.config.persist_session {
+                    return self.reconnect_existing_tabs(&mut state).await;
+                }
+                return Ok(BrowserOutput::success("Browser already running"));
+            }
         }
 
-        let mut builder = ChromeConfig::builder().no_sandbox();
+        // Resolve the Chrome executable path (may download ~150MB on first use):
+        //   1. Explicit config override
+        //   2. CHROME / CHROME_PATH env vars
+        //   3. chromiumoxide default detection (system PATH + well-known paths)
+        //   4. Auto-download via BrowserFetcher (cached in chrome_cache_dir)
+        let executable = resolve_chrome_executable(&self.config).await?;
+
+        // Use a unique temp dir per launch to avoid singleton lock collisions
+        // when multiple workers launch browsers or a previous session crashed.
+        let user_data_dir =
+            std::env::temp_dir().join(format!("spacebot-browser-{}", uuid::Uuid::new_v4()));
+
+        let mut builder = ChromeConfig::builder()
+            .no_sandbox()
+            .chrome_executable(&executable)
+            .user_data_dir(&user_data_dir);
 
         if !self.config.headless {
             builder = builder.with_head().window_size(1280, 900);
-        }
-
-        if let Some(path) = &self.config.executable_path {
-            builder = builder.chrome_executable(path);
         }
 
         let chrome_config = builder.build().map_err(|error| {
@@ -488,7 +574,8 @@ impl BrowserTool {
 
         tracing::info!(
             headless = self.config.headless,
-            executable = ?self.config.executable_path,
+            executable = %executable.display(),
+            user_data_dir = %user_data_dir.display(),
             "launching chrome"
         );
 
@@ -498,11 +585,112 @@ impl BrowserTool {
 
         let handler_task = tokio::spawn(async move { while handler.next().await.is_some() {} });
 
+        // Re-acquire the lock only to store state.
+        let mut state = self.state.lock().await;
+
+        // Guard against a concurrent launch that won the race.
+        if state.browser.is_some() {
+            // Another call launched while we were downloading/starting. Clean up
+            // the browser we just created and return success.
+            drop(browser);
+            handler_task.abort();
+            // Clean up the temp user data dir asynchronously so we don't block
+            // while holding the shared mutex.
+            let dir = user_data_dir;
+            tokio::spawn(async move {
+                let _ = tokio::fs::remove_dir_all(&dir).await;
+            });
+
+            if self.config.persist_session {
+                return self.reconnect_existing_tabs(&mut state).await;
+            }
+            return Ok(BrowserOutput::success("Browser already running"));
+        }
+
         state.browser = Some(browser);
         state._handler_task = Some(handler_task);
+        state.user_data_dir = Some(user_data_dir);
 
         tracing::info!("browser launched");
         Ok(BrowserOutput::success("Browser launched successfully"))
+    }
+
+    /// Discover existing tabs from the browser and rebuild the page map.
+    ///
+    /// Called when a worker connects to an already-running persistent browser.
+    /// Rebuilds `state.pages` from `browser.pages()` so stale entries (tabs
+    /// closed externally) are pruned. Validates that `active_target` still
+    /// points to a live page.
+    ///
+    /// Note: holds the mutex across CDP calls. `Browser::pages()` and the
+    /// per-tab title/url queries are quick CDP round-trips, and concurrent
+    /// browser use during reconnect is rare (workers typically call `launch`
+    /// once at the start of their run).
+    async fn reconnect_existing_tabs(
+        &self,
+        state: &mut BrowserState,
+    ) -> Result<BrowserOutput, BrowserError> {
+        let browser = state
+            .browser
+            .as_ref()
+            .ok_or_else(|| BrowserError::new("browser not launched"))?;
+
+        let pages = browser.pages().await.map_err(|error| {
+            BrowserError::new(format!("failed to enumerate existing tabs: {error}"))
+        })?;
+
+        // Rebuild the page map from the live browser, pruning stale entries.
+        let previous_ids: std::collections::HashSet<String> = state.pages.keys().cloned().collect();
+        let mut refreshed_pages = HashMap::with_capacity(pages.len());
+        for page in pages {
+            let target_id = page_target_id(&page);
+            refreshed_pages.insert(target_id, page);
+        }
+        let discovered = refreshed_pages
+            .keys()
+            .filter(|id| !previous_ids.contains(*id))
+            .count();
+        state.pages = refreshed_pages;
+
+        // Ensure active_target points to a valid page.
+        let active_valid = state
+            .active_target
+            .as_ref()
+            .is_some_and(|id| state.pages.contains_key(id));
+        if !active_valid {
+            state.active_target = state.pages.keys().next().cloned();
+        }
+
+        let tab_count = state.pages.len();
+        let mut tabs = Vec::with_capacity(tab_count);
+        for (id, page) in &state.pages {
+            let title = page.get_title().await.ok().flatten();
+            let url = page.url().await.ok().flatten();
+            let is_active = state.active_target.as_deref() == Some(id);
+            tabs.push(TabInfo {
+                target_id: id.clone(),
+                url,
+                title,
+                active: is_active,
+            });
+        }
+
+        tracing::info!(tab_count, discovered, "reconnected to persistent browser");
+
+        Ok(BrowserOutput {
+            success: true,
+            message: format!(
+                "Connected to persistent browser ({tab_count} tab{} open, {discovered} newly discovered)",
+                if tab_count == 1 { "" } else { "s" }
+            ),
+            url: None,
+            title: None,
+            elements: None,
+            tabs: Some(tabs),
+            screenshot_path: None,
+            eval_result: None,
+            content: None,
+        })
     }
 
     async fn handle_navigate(&self, url: Option<String>) -> Result<BrowserOutput, BrowserError> {
@@ -953,22 +1141,102 @@ impl BrowserTool {
     }
 
     async fn handle_close(&self) -> Result<BrowserOutput, BrowserError> {
-        let mut state = self.state.lock().await;
+        use crate::config::ClosePolicy;
 
-        if let Some(mut browser) = state.browser.take()
-            && let Err(error) = browser.close().await
-        {
-            tracing::warn!(%error, "browser close returned error");
+        match self.config.close_policy {
+            ClosePolicy::Detach => {
+                let mut state = self.state.lock().await;
+                // Clear per-worker element refs but preserve tabs, browser,
+                // handler, and active_target so the next worker picks up
+                // exactly where this one left off.
+                state.element_refs.clear();
+                state.next_ref = 0;
+                tracing::info!(policy = "detach", "worker detached from browser");
+                Ok(BrowserOutput::success(
+                    "Detached from browser (tabs and session preserved)",
+                ))
+            }
+            ClosePolicy::CloseTabs => {
+                // Drain pages under the lock, then close them outside it so
+                // other workers aren't blocked by CDP round-trips.
+                let pages_to_close: Vec<(String, chromiumoxide::Page)> = {
+                    let mut state = self.state.lock().await;
+                    let pages = state.pages.drain().collect();
+                    state.active_target = None;
+                    state.element_refs.clear();
+                    state.next_ref = 0;
+                    pages
+                };
+
+                let mut close_errors = Vec::new();
+                for (id, page) in pages_to_close {
+                    if let Err(error) = page.close().await {
+                        close_errors.push(format!("{id}: {error}"));
+                    }
+                }
+
+                if !close_errors.is_empty() {
+                    let message = format!(
+                        "failed to close {} tab(s): {}",
+                        close_errors.len(),
+                        close_errors.join("; ")
+                    );
+                    tracing::warn!(policy = "close_tabs", %message);
+                    return Err(BrowserError::new(message));
+                }
+
+                tracing::info!(
+                    policy = "close_tabs",
+                    "closed all tabs, browser still running"
+                );
+                Ok(BrowserOutput::success(
+                    "All tabs closed (browser still running)",
+                ))
+            }
+            ClosePolicy::CloseBrowser => {
+                // Take everything out of state under the lock, then do the
+                // actual teardown outside it.
+                let (browser, handler_task, user_data_dir) = {
+                    let mut state = self.state.lock().await;
+                    let browser = state.browser.take();
+                    let handler_task = state._handler_task.take();
+                    let user_data_dir = state.user_data_dir.take();
+                    state.pages.clear();
+                    state.active_target = None;
+                    state.element_refs.clear();
+                    state.next_ref = 0;
+                    (browser, handler_task, user_data_dir)
+                };
+
+                if let Some(task) = handler_task {
+                    task.abort();
+                }
+
+                if let Some(mut browser) = browser
+                    && let Err(error) = browser.close().await
+                {
+                    let message = format!("failed to close browser: {error}");
+                    tracing::warn!(policy = "close_browser", %message);
+                    return Err(BrowserError::new(message));
+                }
+
+                // Clean up the per-launch user data dir to free disk space.
+                if let Some(dir) = user_data_dir {
+                    tokio::spawn(async move {
+                        if let Err(error) = tokio::fs::remove_dir_all(&dir).await {
+                            tracing::debug!(
+                                path = %dir.display(),
+                                %error,
+                                "failed to clean up browser user data dir"
+                            );
+                        }
+                    });
+                }
+
+                tracing::info!(policy = "close_browser", "browser closed");
+                Ok(BrowserOutput::success("Browser closed"))
+            }
         }
-
-        state.pages.clear();
-        state.active_target = None;
-        state.element_refs.clear();
-        state.next_ref = 0;
-        state._handler_task = None;
-
-        tracing::info!("browser closed");
-        Ok(BrowserOutput::success("Browser closed"))
     }
 
     /// Get the active page, or create a first one if the browser has no pages yet.
@@ -1107,4 +1375,89 @@ fn truncate_for_display(text: &str, max_len: usize) -> String {
     } else {
         format!("{}...", &text[..max_len])
     }
+}
+
+/// Resolve the Chrome/Chromium executable path using a layered detection chain:
+///
+/// 1. Explicit config override (`executable_path` in TOML)
+/// 2. `CHROME` / `CHROME_PATH` environment variables
+/// 3. chromiumoxide default detection (system PATH + well-known install paths)
+/// 4. Auto-download via `BrowserFetcher` (cached in `chrome_cache_dir`)
+async fn resolve_chrome_executable(config: &BrowserConfig) -> Result<PathBuf, BrowserError> {
+    // 1. Explicit config
+    if let Some(path) = &config.executable_path {
+        let path = PathBuf::from(path);
+        if path.exists() {
+            tracing::debug!(path = %path.display(), "using configured chrome executable");
+            return Ok(path);
+        }
+        tracing::warn!(
+            path = %path.display(),
+            "configured executable_path does not exist, falling through to detection"
+        );
+    }
+
+    // 2. Environment variables
+    if let Some(path) = detect_chrome_from_env() {
+        tracing::debug!(path = %path.display(), "using chrome from environment variable");
+        return Ok(path);
+    }
+
+    // 3. chromiumoxide default detection (PATH lookup + well-known install paths)
+    if let Ok(path) = chromiumoxide::detection::default_executable(Default::default()) {
+        tracing::debug!(path = %path.display(), "using system-detected chrome");
+        return Ok(path);
+    }
+
+    // 4. Auto-download via fetcher
+    tracing::info!(
+        cache_dir = %config.chrome_cache_dir.display(),
+        "no system Chrome found, downloading via fetcher"
+    );
+    fetch_chrome(&config.chrome_cache_dir).await
+}
+
+/// Check `CHROME` and `CHROME_PATH` environment variables for a Chrome binary.
+fn detect_chrome_from_env() -> Option<PathBuf> {
+    for variable in ["CHROME", "CHROME_PATH"] {
+        if let Ok(value) = std::env::var(variable) {
+            let path = PathBuf::from(&value);
+            if path.exists() {
+                return Some(path);
+            }
+        }
+    }
+    None
+}
+
+/// Download Chromium using chromiumoxide's built-in fetcher.
+/// The binary is cached in `cache_dir` and reused on subsequent launches.
+async fn fetch_chrome(cache_dir: &Path) -> Result<PathBuf, BrowserError> {
+    tokio::fs::create_dir_all(cache_dir)
+        .await
+        .map_err(|error| {
+            BrowserError::new(format!(
+                "failed to create chrome cache dir {}: {error}",
+                cache_dir.display()
+            ))
+        })?;
+
+    let options = BrowserFetcherOptions::builder()
+        .with_path(cache_dir)
+        .build()
+        .map_err(|error| {
+            BrowserError::new(format!("failed to build browser fetcher options: {error}"))
+        })?;
+
+    let fetcher = BrowserFetcher::new(options);
+    let info = fetcher
+        .fetch()
+        .await
+        .map_err(|error| BrowserError::new(format!("failed to download chrome: {error}")))?;
+
+    tracing::info!(
+        path = %info.executable_path.display(),
+        "chrome downloaded and cached"
+    );
+    Ok(info.executable_path)
 }

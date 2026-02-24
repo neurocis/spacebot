@@ -18,7 +18,7 @@ The full message-in → LLM → response-out pipeline is wired end-to-end across
 - **Config** — hierarchical TOML with `Config`, `AgentConfig`, `ResolvedAgentConfig`, `Binding`, `MessagingConfig`. File watcher with event filtering and content hash debounce for hot-reload.
 - **Multi-agent** — per-agent database isolation, `Agent` struct bundles all dependencies
 - **Database connections** — SQLite + LanceDB + redb per-agent, migrations for all tables
-- **LLM** — `SpacebotModel` implements Rig's `CompletionModel`, routes through `LlmManager` via HTTP with retries and fallback chains across 11 providers (Anthropic, OpenAI, OpenRouter, Z.ai, Groq, Together, Fireworks, DeepSeek, xAI, Mistral, OpenCode Zen)
+- **LLM** — `SpacebotModel` implements Rig's `CompletionModel`, routes through `LlmManager` via HTTP with retries and fallback chains across 13 providers (Anthropic, OpenAI, OpenRouter, Kilo Gateway, Z.ai, Groq, Together, Fireworks, DeepSeek, xAI, Mistral, OpenCode Zen, OpenCode Go)
 - **Model routing** — `RoutingConfig` with process-type defaults, task overrides, fallback chains
 - **Memory** — full stack: types, SQLite store (CRUD + graph), LanceDB (embeddings + vector + FTS), fastembed, hybrid search (RRF fusion). `memory_type` filter wired end-to-end through SearchConfig. `total_cmp` for safe sorting.
 - **Memory maintenance** — decay + prune implemented
@@ -36,7 +36,7 @@ The full message-in → LLM → response-out pipeline is wired end-to-end across
 - **Telegram adapter** — full teloxide implementation (long polling, typing indicators, attachment extraction, chat/DM filtering, 4096 char splitting)
 - **Slack adapter** — full slack-morphism implementation (Socket Mode, thread replies, file upload v2, reactions, streaming via edit, workspace/channel/DM filtering via hot-reloadable permissions)
 - **Webhook adapter** — Axum HTTP server (POST /send, GET `/poll/{id}`, GET /health)
-- **Tools** — 16 tools implement Rig's `Tool` trait with real logic (reply, branch, spawn_worker, route, cancel, skip, react, memory_save, memory_recall, set_status, shell, file, exec, browser, cron, web_search)
+- **Tools** — 20+ tools implement Rig's `Tool` trait with real logic (including task board tools, memory tools, `spacebot_docs`, and `config_inspect` alongside reply/branch/worker/browser/shell primitives)
 - **Workspace containment** — file tool validates paths stay within workspace boundary, shell/exec tools block instance directory traversal, sensitive file access, and secret env var leakage
 - **Conversation persistence** — `ConversationLogger` with fire-and-forget SQLite writes, compaction archiving
 - **Cron** — scheduler with timers, active hours, circuit breaker (3 failures → disable), creates real channels. CronTool wired into channel tool factory.
@@ -61,7 +61,7 @@ The full message-in → LLM → response-out pipeline is wired end-to-end across
 
 ### Streaming
 
-Implement `SpacebotModel.stream()` with SSE parsing. The messaging adapters already handle `StreamStart`/`StreamChunk`/`StreamEnd` response types — this is purely the LLM layer.
+`SpacebotModel.stream()` is implemented with provider SSE parsing. Remaining work is wiring stream-native Rig loops (`stream_prompt`) into runtime paths that still use non-streaming `.prompt(...)` calls (for example, cortex chat and channel loops).
 
 ### Cortex Consolidation
 
@@ -71,9 +71,9 @@ Implement `SpacebotModel.stream()` with SSE parsing. The messaging adapters alre
 - Wire real values into `observe()` signal extraction
 - Implement CortexHook observation logic (anomaly detection, consolidation triggers)
 
-### Secrets Store
+### ~~Secrets Store~~ ✓ Shipped
 
-Encrypted credentials in redb with `DecryptedSecret` wrapper type. ChaCha20-Poly1305 AEAD with a local key file. All sensitive config values (`token`, `*_key`) encrypted at rest.
+Implemented. Per-agent credential storage in `secrets.redb` with two categories (system/tool), `secret:` config resolution, auto-migration from plaintext config, and optional AES-256-GCM encryption at rest with OS keystore integration. See [Secret Store](/docs/secrets).
 
 ### Cost Tracking
 
@@ -97,7 +97,6 @@ Per-agent token usage and cost tracking with budget enforcement. Session, daily,
 
 ### Additional Channel Adapters
 
-- **Email** — IMAP polling for inbound, SMTP for outbound. Each email thread maps to a conversation.
 - **WhatsApp** — Meta Cloud API. Hosted instances receive webhooks via the platform proxy. Self-hosted users point the callback URL at their own reverse proxy or Tailscale funnel.
 - **Matrix** — decentralized chat protocol. Bridges to self-hosted Matrix/Element deployments.
 - **iMessage** — macOS-only, AppleScript bridge. Personal use on self-hosted Mac instances.

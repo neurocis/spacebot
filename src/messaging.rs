@@ -1,6 +1,7 @@
-//! Messaging adapters (Discord, Slack, Telegram, Twitch, Webhook, WebChat).
+//! Messaging adapters (Discord, Slack, Telegram, Twitch, Email, Webhook, WebChat).
 
 pub mod discord;
+pub mod email;
 pub mod manager;
 pub mod slack;
 pub mod target;
@@ -12,3 +13,4 @@ pub mod webhook;
 
 pub use manager::MessagingManager;
 pub use traits::Messaging;
+pub use traits::apply_runtime_adapter_to_conversation_id;

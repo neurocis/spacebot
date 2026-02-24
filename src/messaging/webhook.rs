@@ -37,6 +37,7 @@ struct AppState {
     inbound_tx: Arc<RwLock<Option<mpsc::Sender<InboundMessage>>>>,
     response_buffers: Arc<RwLock<HashMap<String, Vec<WebhookResponse>>>>,
     auth_token: Option<String>,
+    runtime_key: String,
 }
 
 /// Inbound webhook request body.
@@ -103,6 +104,7 @@ impl Messaging for WebhookAdapter {
             inbound_tx: self.inbound_tx.clone(),
             response_buffers: self.response_buffers.clone(),
             auth_token: self.auth_token.clone(),
+            runtime_key: self.name().to_string(),
         };
 
         if self.auth_token.is_none() {
@@ -262,12 +264,21 @@ async fn handle_send(
         "display_name".into(),
         serde_json::Value::String(request.sender_id.clone()),
     );
+    metadata.insert(
+        "sender_display_name".into(),
+        serde_json::Value::String(request.sender_id.clone()),
+    );
+    metadata.insert(
+        crate::metadata_keys::CHANNEL_NAME.into(),
+        serde_json::Value::String(request.conversation_id.clone()),
+    );
 
     let conversation_id = format!("webhook:{}", request.conversation_id);
 
     let inbound = InboundMessage {
         id: uuid::Uuid::new_v4().to_string(),
         source: "webhook".into(),
+        adapter: Some(state.runtime_key.clone()),
         conversation_id,
         sender_id: request.sender_id.clone(),
         agent_id: request.agent_id.map(Into::into),

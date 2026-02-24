@@ -12,6 +12,8 @@ pub struct StatusBlock {
     pub active_workers: Vec<WorkerStatus>,
     /// Recently completed work.
     pub completed_items: Vec<CompletedItem>,
+    /// Active link conversations with other agents.
+    pub active_link_conversations: Vec<LinkConversationStatus>,
 }
 
 /// Status of an active branch.
@@ -31,6 +33,8 @@ pub struct WorkerStatus {
     pub started_at: DateTime<Utc>,
     pub notify_on_complete: bool,
     pub tool_calls: usize,
+    /// Whether this worker accepts follow-up input via route.
+    pub interactive: bool,
 }
 
 /// Recently completed work item.
@@ -41,6 +45,18 @@ pub struct CompletedItem {
     pub description: String,
     pub completed_at: DateTime<Utc>,
     pub result_summary: String,
+    /// Whether this item's result has been relayed to the user via retrigger.
+    /// Once relayed, the result summary is excluded from the status block to
+    /// prevent the LLM from re-summarising stale results.
+    pub relayed: bool,
+}
+
+/// Status of an active link conversation.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct LinkConversationStatus {
+    pub peer_agent: String,
+    pub started_at: DateTime<Utc>,
+    pub turn_count: u32,
 }
 
 /// Type of completed item.
@@ -67,6 +83,11 @@ impl StatusBlock {
                     worker.status.clone_from(status);
                 }
             }
+            ProcessEvent::WorkerIdle { worker_id, .. } => {
+                if let Some(worker) = self.active_workers.iter_mut().find(|w| w.id == *worker_id) {
+                    worker.status = "idle".to_string();
+                }
+            }
             ProcessEvent::WorkerComplete {
                 worker_id,
                 result,
@@ -84,6 +105,7 @@ impl StatusBlock {
                             description: worker.task,
                             completed_at: Utc::now(),
                             result_summary: result.clone(),
+                            relayed: false,
                         });
                     }
                 }
@@ -110,15 +132,41 @@ impl StatusBlock {
                         description: branch.description,
                         completed_at: Utc::now(),
                         result_summary: conclusion.clone(),
+                        relayed: false,
                     });
                 }
-
-                // Keep only last 10 completed items
-                if self.completed_items.len() > 10 {
-                    self.completed_items.remove(0);
-                }
+            }
+            ProcessEvent::AgentMessageSent { to_agent_id, .. } => {
+                self.track_link_conversation(to_agent_id.as_ref());
             }
             _ => {}
+        }
+
+        // Prune completed items: drop relayed items older than 5 minutes,
+        // then cap at 10 to bound status block size.
+        self.prune_completed_items();
+    }
+
+    /// Mark completed items as relayed so the status block stops showing
+    /// their full result summaries. Called after a retrigger turn succeeds.
+    pub fn mark_relayed(&mut self, process_ids: &[String]) {
+        for item in &mut self.completed_items {
+            if process_ids.contains(&item.id) {
+                item.relayed = true;
+            }
+        }
+    }
+
+    /// Remove stale completed items: relayed items older than 5 minutes are
+    /// dropped entirely, then total count is capped at 10.
+    fn prune_completed_items(&mut self) {
+        let cutoff = Utc::now() - chrono::Duration::minutes(5);
+        self.completed_items
+            .retain(|item| !(item.relayed && item.completed_at < cutoff));
+
+        // Hard cap: keep the 10 most recent.
+        while self.completed_items.len() > 10 {
+            self.completed_items.remove(0);
         }
     }
 
@@ -132,7 +180,13 @@ impl StatusBlock {
     }
 
     /// Add a new active worker.
-    pub fn add_worker(&mut self, id: WorkerId, task: impl Into<String>, notify_on_complete: bool) {
+    pub fn add_worker(
+        &mut self,
+        id: WorkerId,
+        task: impl Into<String>,
+        notify_on_complete: bool,
+        interactive: bool,
+    ) {
         self.active_workers.push(WorkerStatus {
             id,
             task: task.into(),
@@ -140,12 +194,50 @@ impl StatusBlock {
             started_at: Utc::now(),
             notify_on_complete,
             tool_calls: 0,
+            interactive,
         });
+    }
+
+    /// Remove an active worker from the status block.
+    pub fn remove_worker(&mut self, worker_id: WorkerId) -> bool {
+        if let Some(position) = self
+            .active_workers
+            .iter()
+            .position(|worker| worker.id == worker_id)
+        {
+            self.active_workers.remove(position);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Remove an active branch from the status block.
+    pub fn remove_branch(&mut self, branch_id: BranchId) -> bool {
+        if let Some(position) = self
+            .active_branches
+            .iter()
+            .position(|branch| branch.id == branch_id)
+        {
+            self.active_branches.remove(position);
+            true
+        } else {
+            false
+        }
     }
 
     /// Render the status block as a string for context injection.
     pub fn render(&self) -> String {
+        self.render_with_time_context(None)
+    }
+
+    /// Render the status block with optional current time context.
+    pub fn render_with_time_context(&self, current_time_line: Option<&str>) -> String {
         let mut output = String::new();
+
+        if let Some(current_time_line) = current_time_line {
+            output.push_str(&format!("Current date/time: {current_time_line}\n\n"));
+        }
 
         // Active workers
         if !self.active_workers.is_empty() {
@@ -182,10 +274,33 @@ impl StatusBlock {
             output.push('\n');
         }
 
-        // Recently completed
-        if !self.completed_items.is_empty() {
+        // Active link conversations
+        if !self.active_link_conversations.is_empty() {
+            output.push_str("## Active Link Conversations\n");
+            for link in &self.active_link_conversations {
+                output.push_str(&format!(
+                    "- **{}** ({} turns, started {})\n",
+                    link.peer_agent,
+                    link.turn_count,
+                    link.started_at.format("%H:%M"),
+                ));
+            }
+            output.push('\n');
+        }
+
+        // Recently completed — only show items not yet relayed to the user.
+        // Relayed items already appeared in conversation via the retrigger flow;
+        // keeping their full summaries here causes the LLM to re-summarise them.
+        let unrelayed: Vec<_> = self
+            .completed_items
+            .iter()
+            .rev()
+            .filter(|item| !item.relayed)
+            .take(5)
+            .collect();
+        if !unrelayed.is_empty() {
             output.push_str("## Recently Completed\n");
-            for item in self.completed_items.iter().rev().take(5) {
+            for item in &unrelayed {
                 let type_str = match item.item_type {
                     CompletedItemType::Branch => "branch",
                     CompletedItemType::Worker => "worker",
@@ -216,5 +331,54 @@ impl StatusBlock {
     /// Get the number of active branches.
     pub fn active_branch_count(&self) -> usize {
         self.active_branches.len()
+    }
+
+    /// Track a new link conversation or increment turn count.
+    pub fn track_link_conversation(&mut self, peer_agent: impl Into<String>) {
+        let peer = peer_agent.into();
+        if let Some(existing) = self
+            .active_link_conversations
+            .iter_mut()
+            .find(|l| l.peer_agent == peer)
+        {
+            existing.turn_count += 1;
+        } else {
+            self.active_link_conversations.push(LinkConversationStatus {
+                peer_agent: peer,
+                started_at: Utc::now(),
+                turn_count: 1,
+            });
+        }
+    }
+
+    /// Remove a link conversation (concluded or timed out).
+    pub fn remove_link_conversation(&mut self, peer_agent: &str) {
+        self.active_link_conversations
+            .retain(|l| l.peer_agent != peer_agent);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::StatusBlock;
+    use uuid::Uuid;
+
+    #[test]
+    fn render_with_time_context_renders_current_time_when_empty() {
+        let status = StatusBlock::new();
+        let rendered = status.render_with_time_context(Some("2026-02-26 12:00:00 UTC"));
+        assert!(rendered.contains("Current date/time: 2026-02-26 12:00:00 UTC"));
+    }
+
+    #[test]
+    fn remove_branch_removes_existing_branch() {
+        let mut status = StatusBlock::new();
+        let branch_id = Uuid::new_v4();
+        status.add_branch(branch_id, "work");
+
+        let removed = status.remove_branch(branch_id);
+
+        assert!(removed);
+        assert!(status.active_branches.is_empty());
     }
 }

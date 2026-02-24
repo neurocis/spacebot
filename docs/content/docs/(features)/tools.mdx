@@ -1,6 +1,6 @@
 ---
 title: Tools
-description: All 16 tools that give LLM processes the ability to act.
+description: Tools that give LLM processes the ability to act.
 ---
 
 # Tools
@@ -11,7 +11,7 @@ How Spacebot gives LLM processes the ability to act.
 
 Every tool implements Rig's `Tool` trait and lives in `src/tools/`. Tools are organized by function, not by consumer. Which process gets which tools is configured via ToolServer factory functions in `src/tools.rs`.
 
-All 16 tools:
+Core tools include:
 
 | Tool | Purpose | Consumers |
 |------|---------|-----------|
@@ -25,6 +25,9 @@ All 16 tools:
 | `memory_save` | Write a memory to the store | Branch, Cortex, Compactor |
 | `memory_recall` | Search memories via hybrid search | Branch |
 | `channel_recall` | Retrieve transcript from another channel | Branch |
+| `spacebot_docs` | Read embedded Spacebot docs/changelog/AGENTS | Branch, Cortex Chat |
+| `email_search` | Search IMAP mailbox content directly | Branch |
+| `config_inspect` | Inspect live resolved runtime config (redacted) | Cortex Chat |
 | `set_status` | Report worker progress to the channel | Worker |
 | `shell` | Execute shell commands | Worker |
 | `file` | Read, write, and list files | Worker |
@@ -36,7 +39,7 @@ All 16 tools:
 
 Rig's `ToolServer` runs as a tokio task. You register tools on it, call `.run()` to get a `ToolServerHandle`, and pass that handle to agents. The handle is `Clone` — all clones point to the same server task.
 
-Spacebot uses four ToolServer configurations:
+Spacebot uses five ToolServer configurations:
 
 ### Channel ToolServer (per-channel)
 
@@ -70,11 +73,13 @@ Each branch gets its own isolated ToolServer, created at spawn time via `create_
 ├──────────────────────────────────────────────┤
 │   memory_save      (Arc<MemorySearch>)       │
 │   memory_recall    (Arc<MemorySearch>)       │
+│   spacebot_docs    (embedded docs)            │
 │   channel_recall   (ConversationLogger)      │
+│   email_search     (IMAP mailbox search)     │
 └──────────────────────────────────────────────┘
 ```
 
-Branch isolation ensures `memory_recall` and `channel_recall` are never visible to the channel. All tools are registered at creation and live for the lifetime of the branch.
+Branch isolation ensures `memory_recall`, `channel_recall`, `spacebot_docs`, and `email_search` are never visible to the channel. All tools are registered at creation and live for the lifetime of the branch.
 
 ### Worker ToolServer (per-worker)
 
@@ -89,10 +94,12 @@ Each worker gets its own isolated ToolServer, created at spawn time via `create_
 │   exec                                   │
 │   set_status  (agent_id, worker_id, ...) │
 │   browser     (if browser.enabled)       │
+│   web_search  (if configured)            │
+│   mcp_*       (registered at worker startup for MCP tools connected at that time) │
 └──────────────────────────────────────────┘
 ```
 
-`shell`, `file`, and `exec` are stateless unit structs. `set_status` is bound to a specific worker's ID so status updates route to the right place in the channel's status block. `browser` is conditionally registered based on the agent's `browser.enabled` config.
+`shell` and `exec` hold a shared `Sandbox` reference that wraps commands in OS-level containment (bubblewrap on Linux, sandbox-exec on macOS). `file` validates paths against the workspace boundary. `set_status` is bound to a specific worker's ID so status updates route to the right place in the channel's status block. `browser` is conditionally registered based on the agent's `browser.enabled` config. MCP tools are fetched and registered once at worker startup for servers connected at that time.
 
 Workers don't get memory tools or channel tools. They can't talk to the user, can't recall memories, can't spawn branches. They execute their task and report status.
 
@@ -110,6 +117,24 @@ One per agent, minimal.
 
 The cortex writes consolidated memories. It doesn't need recall (it's the consolidator, not the recaller) or any channel/worker tools.
 
+### Cortex Chat ToolServer
+
+One per cortex-chat session context, full diagnostic/admin toolset.
+
+```
+┌──────────────────────────────────────────────┐
+│         Cortex Chat ToolServer              │
+├──────────────────────────────────────────────┤
+│   memory_save / memory_recall / memory_delete│
+│   channel_recall                            │
+│   task_create / task_list / task_update     │
+│   spacebot_docs / config_inspect            │
+│   shell / file / exec                       │
+│   browser     (if enabled)                  │
+│   web_search  (if configured)               │
+└──────────────────────────────────────────────┘
+```
+
 ## Factory Functions
 
 All in `src/tools.rs`:
@@ -125,18 +150,21 @@ remove_channel_tools(handle)
 // Per branch spawn — creates an isolated ToolServer with memory + channel recall tools
 create_branch_tool_server(memory_search, conversation_logger) -> ToolServerHandle
 
-// Per worker spawn — creates an isolated ToolServer (browser conditionally included)
+// Per worker spawn — creates an isolated ToolServer (browser/web_search/MCP conditionally included)
 create_worker_tool_server(agent_id, worker_id, channel_id, event_tx, browser_config, screenshot_dir) -> ToolServerHandle
 
 // Agent startup — creates the cortex ToolServer
 create_cortex_tool_server(memory_search) -> ToolServerHandle
+
+// Cortex chat startup — creates an interactive admin ToolServer
+create_cortex_chat_tool_server(...) -> ToolServerHandle
 ```
 
 ## Tool Lifecycle
 
 ### Static tools (registered at creation)
 
-`memory_save`, `memory_recall`, `channel_recall` on branch ToolServers. `shell`, `file`, `exec` on worker ToolServers. `memory_save` on cortex and compactor ToolServers. These are registered before `.run()` via the builder pattern and live for the lifetime of the ToolServer.
+`memory_save`, `memory_recall`, `channel_recall`, `spacebot_docs`, `email_search` on branch ToolServers. `shell`, `file`, `exec` on worker ToolServers. `memory_save` on cortex and compactor ToolServers. These are registered before `.run()` via the builder pattern and live for the lifetime of the ToolServer.
 
 ### Dynamic tools (added/removed at runtime)
 
@@ -153,7 +181,7 @@ create_cortex_tool_server(memory_search) -> ToolServerHandle
 
 ### Per-process tools (created and destroyed with the process)
 
-Branch and worker ToolServers are created when the process spawns and dropped when it finishes. Each branch gets `memory_save` + `memory_recall` + `channel_recall`. Each worker gets `shell`, `file`, `exec`, `set_status` (bound to that worker's ID), and optionally `browser`.
+Branch and worker ToolServers are created when the process spawns and dropped when it finishes. Each branch gets `memory_save` + `memory_recall` + `channel_recall` + `spacebot_docs` + `email_search` (plus task board tools). Each worker gets `shell`, `file`, `exec`, `set_status` (bound to that worker's ID), and optionally `browser`, `web_search`, and connected `mcp_*` tools.
 
 ## Tool Design Patterns
 
@@ -171,17 +199,19 @@ async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
 }
 ```
 
-### Protected paths
+### Sandbox containment
 
-The `file` tool rejects reads and writes to identity/memory paths (`prompts/`, `identity/`, `data/`, `SOUL.md`, `IDENTITY.md`, `USER.md`). Workers should use `memory_save` for that content, not raw file writes.
+Shell and exec commands run inside an OS-level sandbox (bubblewrap on Linux, sandbox-exec on macOS). The entire filesystem is mounted read-only except the workspace, `/tmp`, and any configured `writable_paths`. The agent's data directory (databases, config files) is explicitly protected.
+
+Worker subprocesses also start with a clean environment -- they never inherit the parent's environment variables. System secrets (LLM API keys, messaging tokens) are never visible to workers regardless of sandbox mode. See [Sandbox](/docs/sandbox) for full details.
+
+The `file` tool independently validates paths against the workspace boundary and rejects writes to identity files (`SOUL.md`, `IDENTITY.md`, `USER.md`). The `exec` tool blocks dangerous environment variables (`LD_PRELOAD`, `DYLD_INSERT_LIBRARIES`, etc.) that enable library injection regardless of sandbox state.
+
+Leak detection (via `SpacebotHook`) scans all tool output for secret patterns (API keys, tokens, PEM keys) and terminates the process if a leak is found. This includes base64-encoded, URL-encoded, and hex-encoded variants.
 
 ### Status reporting
 
-Workers report progress via `set_status`. The channel sees these in its status block. Status updates use `try_send` (non-blocking) so a slow event bus never blocks tool execution.
-
-### Fire-and-forget sends
-
-`set_status` uses `try_send` instead of `.await` on the event channel. If the channel is full, the update is dropped rather than blocking the worker.
+Workers report progress via `set_status`, and the channel sees those updates in its status block. `set_status` uses `try_send` (non-blocking), so if the event channel is full the update is dropped instead of blocking the worker.
 
 ## What Each Tool Does
 
@@ -224,13 +254,17 @@ If the name doesn't match any channel, falls back to list mode so the LLM can se
 
 Channel names are resolved from the `discord_channel_name` field stored in message metadata. The tool queries `conversation_messages` in SQLite directly — it reads persisted messages, not in-memory Rig history.
 
+### email_search
+
+Searches the configured email mailbox directly over IMAP with filters like sender (`from`), subject, text query, unread-only, and time window (`since_days`). Returns message metadata plus a body snippet for precise read-back in email workflows.
+
 ### set_status
 
 Reports the worker's current progress. The status string appears in the channel's status block so the user-facing process knows what's happening without polling.
 
 ### shell
 
-Runs a shell command via `sh -c` (Unix) or `cmd /C` (Windows). Captures stdout, stderr, exit code. Has a configurable timeout (default 60s).
+Runs a shell command via `sh -c` (Unix) or `cmd /C` (Windows). Captures stdout, stderr, exit code. Has a configurable timeout (default 60s). Commands are wrapped in the sandbox when enabled — the filesystem is read-only except for the workspace and configured writable paths.
 
 ### file
 
@@ -238,7 +272,7 @@ Read, write, or list files. Protects identity/memory paths. Creates parent direc
 
 ### exec
 
-Runs a specific program with explicit arguments and environment variables. More precise than `shell` for running compilers, test runners, etc. Configurable timeout.
+Runs a specific program with explicit arguments and environment variables. More precise than `shell` for running compilers, test runners, etc. Configurable timeout. Sandboxed like `shell`. Blocks dangerous env vars (`LD_PRELOAD`, `NODE_OPTIONS`, etc.) that enable code injection.
 
 ### browser
 

@@ -1,9 +1,8 @@
 //! Spawn worker tool for creating new workers.
 
 use crate::WorkerId;
-use crate::agent::channel::{
-    ChannelState, spawn_opencode_worker_from_state, spawn_worker_from_state,
-};
+use crate::agent::channel::ChannelState;
+use crate::agent::channel_dispatch::{spawn_opencode_worker_from_state, spawn_worker_from_state};
 use rig::completion::ToolDefinition;
 use rig::tool::Tool;
 use schemars::JsonSchema;
@@ -87,7 +86,7 @@ impl Tool for SpawnWorkerTool {
         }
 
         let opencode_note = if opencode_enabled {
-            " Set worker_type to \"opencode\" with a directory path for complex coding tasks — this spawns a full OpenCode coding agent with codebase exploration, context management, and its own tool suite."
+            " Set `worker_type` to \"opencode\" with a `directory` path for complex coding tasks — this spawns a full OpenCode coding agent with codebase exploration, context management, and its own tool suite. If `worker_type` is omitted, the builtin worker is used."
         } else {
             ""
         };
@@ -121,7 +120,7 @@ impl Tool for SpawnWorkerTool {
                     "type": "string",
                     "enum": ["builtin", "opencode"],
                     "default": "builtin",
-                    "description": "\"builtin\" (default) runs a Rig agent loop. \"opencode\" spawns a full OpenCode coding agent — use for complex multi-file coding tasks."
+                    "description": "\"builtin\" (default) runs a Rig agent loop. \"opencode\" spawns a full OpenCode coding agent — use for complex multi-file coding tasks. Do not claim OpenCode unless this field is explicitly set to \"opencode\"."
                 }),
             );
             obj.insert(

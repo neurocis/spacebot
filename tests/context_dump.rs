@@ -10,8 +10,29 @@
 use anyhow::Context as _;
 use std::sync::Arc;
 
+/// Set up the secrets store thread-local so `secret:` references in config.toml
+/// resolve correctly. Mirrors the bootstrap logic in main.rs.
+fn bootstrap_secrets_for_config() {
+    let instance_dir = spacebot::config::Config::default_instance_dir();
+    let secrets_path = instance_dir.join("data").join("secrets.redb");
+    if !secrets_path.exists() {
+        return;
+    }
+    if let Ok(store) = spacebot::secrets::store::SecretsStore::new(&secrets_path) {
+        let store = Arc::new(store);
+        if store.is_encrypted() {
+            let keystore = spacebot::secrets::keystore::platform_keystore();
+            if let Some(key) = keystore.load_key("instance").ok().flatten() {
+                let _ = store.unlock(&key);
+            }
+        }
+        spacebot::config::set_resolve_secrets_store(store);
+    }
+}
+
 /// Bootstrap AgentDeps from the real ~/.spacebot config (same as bulletin test).
 async fn bootstrap_deps() -> anyhow::Result<(spacebot::AgentDeps, spacebot::config::Config)> {
+    bootstrap_secrets_for_config();
     let config =
         spacebot::config::Config::load().context("failed to load ~/.spacebot/config.toml")?;
 
@@ -49,6 +70,7 @@ async fn bootstrap_deps() -> anyhow::Result<(spacebot::AgentDeps, spacebot::conf
         embedding_table,
         embedding_model,
     ));
+    let task_store = Arc::new(spacebot::tasks::TaskStore::new(db.sqlite.clone()));
 
     let identity = spacebot::identity::Identity::load(&agent_config.workspace).await;
     let prompts =
@@ -65,21 +87,46 @@ async fn bootstrap_deps() -> anyhow::Result<(spacebot::AgentDeps, spacebot::conf
         skills,
     ));
 
-    let (event_tx, _) = tokio::sync::broadcast::channel(16);
+    let (event_tx, memory_event_tx) = spacebot::create_process_event_buses_with_capacity(16, 32);
 
     let agent_id: spacebot::AgentId = Arc::from(agent_config.id.as_str());
     let mcp_manager = Arc::new(spacebot::mcp::McpManager::new(agent_config.mcp.clone()));
+
+    let sandbox_config = Arc::new(arc_swap::ArcSwap::from_pointee(
+        agent_config.sandbox.clone(),
+    ));
+    let sandbox = Arc::new(
+        spacebot::sandbox::Sandbox::new(
+            sandbox_config,
+            agent_config.workspace.clone(),
+            &config.instance_dir,
+            agent_config.data_dir.clone(),
+        )
+        .await,
+    );
 
     let deps = spacebot::AgentDeps {
         agent_id,
         memory_search,
         llm_manager,
         mcp_manager,
+        task_store,
         cron_tool: None,
         runtime_config,
         event_tx,
+        memory_event_tx,
         sqlite_pool: db.sqlite.clone(),
         messaging_manager: None,
+        sandbox,
+        links: Arc::new(arc_swap::ArcSwap::from_pointee(Vec::new())),
+        agent_names: Arc::new(std::collections::HashMap::new()),
+        task_store_registry: Arc::new(arc_swap::ArcSwap::from_pointee(
+            std::collections::HashMap::new(),
+        )),
+        process_control_registry: Arc::new(
+            spacebot::agent::process_control::ProcessControlRegistry::new(),
+        ),
+        injection_tx: tokio::sync::mpsc::channel(1).0,
     };
 
     Ok((deps, config))
@@ -152,6 +199,7 @@ fn build_channel_system_prompt(rc: &spacebot::config::RuntimeConfig) -> String {
             None,
             None,
             None,
+            false,
         )
         .expect("failed to render channel prompt")
 }
@@ -182,12 +230,12 @@ async fn dump_channel_context() {
         history: Arc::new(tokio::sync::RwLock::new(Vec::new())),
         active_branches: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
         worker_handles: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
-        process_run_logger: spacebot::conversation::ProcessRunLogger::new(deps.sqlite_pool.clone()),
         active_workers: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
         worker_inputs: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
         status_block,
         deps: deps.clone(),
         conversation_logger,
+        process_run_logger: spacebot::conversation::ProcessRunLogger::new(deps.sqlite_pool.clone()),
         channel_store,
         screenshot_dir: std::path::PathBuf::from("/tmp/screenshots"),
         logs_dir: std::path::PathBuf::from("/tmp/logs"),
@@ -205,6 +253,8 @@ async fn dump_channel_context() {
         skip_flag,
         replied_flag,
         None,
+        None,
+        true,
     )
     .await
     .expect("failed to add channel tools");
@@ -256,10 +306,17 @@ async fn dump_branch_context() {
     let conversation_logger =
         spacebot::conversation::ConversationLogger::new(deps.sqlite_pool.clone());
     let channel_store = spacebot::conversation::ChannelStore::new(deps.sqlite_pool.clone());
+    let run_logger = spacebot::conversation::ProcessRunLogger::new(deps.sqlite_pool.clone());
     let branch_tool_server = spacebot::tools::create_branch_tool_server(
+        None,
+        deps.agent_id.clone(),
+        deps.task_store.clone(),
         deps.memory_search.clone(),
+        deps.runtime_config.clone(),
+        deps.memory_event_tx.clone(),
         conversation_logger,
         channel_store,
+        run_logger,
     );
 
     let tool_defs = branch_tool_server
@@ -300,7 +357,15 @@ async fn dump_worker_context() {
     let instance_dir = rc.instance_dir.to_string_lossy();
     let workspace_dir = rc.workspace_dir.to_string_lossy();
     let worker_prompt = prompt_engine
-        .render_worker_prompt(&instance_dir, &workspace_dir)
+        .render_worker_prompt(
+            &instance_dir,
+            &workspace_dir,
+            false,
+            false,
+            Vec::new(),
+            Vec::new(),
+            &[],
+        )
         .expect("failed to render worker prompt");
     print_section("WORKER SYSTEM PROMPT", &worker_prompt);
     print_stats("System prompt", &worker_prompt);
@@ -314,12 +379,13 @@ async fn dump_worker_context() {
         deps.agent_id.clone(),
         worker_id,
         None,
+        deps.task_store.clone(),
         deps.event_tx.clone(),
         browser_config,
         std::path::PathBuf::from("/tmp/screenshots"),
         brave_search_key,
         std::path::PathBuf::from("/tmp"),
-        std::path::PathBuf::from("/tmp"),
+        deps.sandbox.clone(),
         vec![],
         deps.runtime_config.clone(),
     );
@@ -392,7 +458,6 @@ async fn dump_all_contexts() {
         history: Arc::new(tokio::sync::RwLock::new(Vec::new())),
         active_branches: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
         worker_handles: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
-        process_run_logger: spacebot::conversation::ProcessRunLogger::new(deps.sqlite_pool.clone()),
         active_workers: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
         worker_inputs: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
         status_block: Arc::new(tokio::sync::RwLock::new(
@@ -400,6 +465,7 @@ async fn dump_all_contexts() {
         )),
         deps: deps.clone(),
         conversation_logger: conversation_logger.clone(),
+        process_run_logger: spacebot::conversation::ProcessRunLogger::new(deps.sqlite_pool.clone()),
         channel_store: channel_store.clone(),
         screenshot_dir: std::path::PathBuf::from("/tmp/screenshots"),
         logs_dir: std::path::PathBuf::from("/tmp/logs"),
@@ -416,6 +482,8 @@ async fn dump_all_contexts() {
         skip_flag,
         replied_flag,
         None,
+        None,
+        true,
     )
     .await
     .expect("failed to add channel tools");
@@ -436,10 +504,17 @@ async fn dump_all_contexts() {
     let branch_prompt = prompt_engine
         .render_branch_prompt(&instance_dir, &workspace_dir)
         .expect("failed to render branch prompt");
+    let run_logger = spacebot::conversation::ProcessRunLogger::new(deps.sqlite_pool.clone());
     let branch_tool_server = spacebot::tools::create_branch_tool_server(
+        None,
+        deps.agent_id.clone(),
+        deps.task_store.clone(),
         deps.memory_search.clone(),
+        deps.runtime_config.clone(),
+        deps.memory_event_tx.clone(),
         conversation_logger,
         channel_store,
+        run_logger,
     );
     let branch_tool_defs = branch_tool_server.get_tool_defs(None).await.unwrap();
     let branch_tools_text = format_tool_defs(&branch_tool_defs);
@@ -456,7 +531,15 @@ async fn dump_all_contexts() {
 
     // ── Worker ──
     let worker_prompt = prompt_engine
-        .render_worker_prompt(&instance_dir, &workspace_dir)
+        .render_worker_prompt(
+            &instance_dir,
+            &workspace_dir,
+            false,
+            false,
+            Vec::new(),
+            Vec::new(),
+            &[],
+        )
         .expect("failed to render worker prompt");
     let browser_config = (**rc.browser_config.load()).clone();
     let brave_search_key = (**rc.brave_search_key.load()).clone();
@@ -464,12 +547,13 @@ async fn dump_all_contexts() {
         deps.agent_id.clone(),
         uuid::Uuid::new_v4(),
         None,
+        deps.task_store.clone(),
         deps.event_tx.clone(),
         browser_config,
         std::path::PathBuf::from("/tmp/screenshots"),
         brave_search_key,
         std::path::PathBuf::from("/tmp"),
-        std::path::PathBuf::from("/tmp"),
+        deps.sandbox.clone(),
         vec![],
         deps.runtime_config.clone(),
     );

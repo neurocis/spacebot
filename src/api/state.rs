@@ -11,6 +11,7 @@ use crate::memory::{EmbeddingModel, MemorySearch};
 use crate::messaging::MessagingManager;
 use crate::messaging::webchat::WebChatAdapter;
 use crate::prompts::PromptEngine;
+use crate::tasks::TaskStore;
 use crate::update::SharedUpdateStatus;
 use crate::{ProcessEvent, ProcessId};
 
@@ -27,6 +28,10 @@ use tokio::sync::{RwLock, broadcast, mpsc};
 #[derive(Debug, Clone, Serialize)]
 pub struct AgentInfo {
     pub id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub role: Option<String>,
     pub workspace: PathBuf,
     pub context_window: usize,
     pub max_turns: usize,
@@ -61,10 +66,16 @@ pub struct ApiState {
     pub cron_stores: arc_swap::ArcSwap<HashMap<String, Arc<CronStore>>>,
     /// Per-agent cron schedulers for job timer management.
     pub cron_schedulers: arc_swap::ArcSwap<HashMap<String, Arc<Scheduler>>>,
+    /// Per-agent task stores for task CRUD operations.
+    pub task_stores: arc_swap::ArcSwap<HashMap<String, Arc<TaskStore>>>,
     /// Per-agent RuntimeConfig for reading live hot-reloaded configuration.
     pub runtime_configs: ArcSwap<HashMap<String, Arc<RuntimeConfig>>>,
     /// Per-agent MCP managers for status and reconnect APIs.
     pub mcp_managers: ArcSwap<HashMap<String, Arc<McpManager>>>,
+    /// Per-agent sandbox instances for process containment.
+    pub sandboxes: ArcSwap<HashMap<String, Arc<crate::sandbox::Sandbox>>>,
+    /// Instance-level secrets store (shared across all agents).
+    pub secrets_store: ArcSwap<Option<Arc<crate::secrets::store::SecretsStore>>>,
     /// Shared reference to the Discord permissions ArcSwap (same instance used by the adapter and file watcher).
     pub discord_permissions: RwLock<Option<Arc<ArcSwap<DiscordPermissions>>>>,
     /// Shared reference to the Slack permissions ArcSwap (same instance used by the adapter and file watcher).
@@ -93,6 +104,17 @@ pub struct ApiState {
     pub agent_remove_tx: mpsc::Sender<String>,
     /// Shared webchat adapter for session management from API handlers.
     pub webchat_adapter: ArcSwap<Option<Arc<WebChatAdapter>>>,
+    /// Cross-agent task store registry for delegation.
+    pub task_store_registry:
+        Arc<ArcSwap<std::collections::HashMap<String, Arc<crate::tasks::TaskStore>>>>,
+    /// Sender for cross-agent message injection.
+    pub injection_tx: mpsc::Sender<crate::ChannelInjection>,
+    /// Instance-level agent links for the communication graph.
+    pub agent_links: ArcSwap<Vec<crate::links::AgentLink>>,
+    /// Visual agent groups for the topology UI.
+    pub agent_groups: ArcSwap<Vec<crate::config::GroupDef>>,
+    /// Org-level humans for the topology UI.
+    pub agent_humans: ArcSwap<Vec<crate::config::HumanDef>>,
 }
 
 /// Events sent to SSE clients. Wraps ProcessEvents with agent context.
@@ -119,12 +141,21 @@ pub enum ApiEvent {
         channel_id: String,
         is_typing: bool,
     },
+    /// Streaming text delta for an outbound assistant message.
+    OutboundMessageDelta {
+        agent_id: String,
+        channel_id: String,
+        text_delta: String,
+        aggregated_text: String,
+    },
     /// A worker was started.
     WorkerStarted {
         agent_id: String,
         channel_id: Option<String>,
         worker_id: String,
         task: String,
+        worker_type: String,
+        interactive: bool,
     },
     /// A worker's status changed.
     WorkerStatusUpdate {
@@ -133,12 +164,19 @@ pub enum ApiEvent {
         worker_id: String,
         status: String,
     },
+    /// A worker entered the idle state (waiting for follow-up input).
+    WorkerIdle {
+        agent_id: String,
+        channel_id: Option<String>,
+        worker_id: String,
+    },
     /// A worker completed.
     WorkerCompleted {
         agent_id: String,
         channel_id: Option<String>,
         worker_id: String,
         result: String,
+        success: bool,
     },
     /// A branch was started.
     BranchStarted {
@@ -161,6 +199,7 @@ pub enum ApiEvent {
         process_type: String,
         process_id: String,
         tool_name: String,
+        args: String,
     },
     /// A tool call completed on a process.
     ToolCompleted {
@@ -169,9 +208,38 @@ pub enum ApiEvent {
         process_type: String,
         process_id: String,
         tool_name: String,
+        result: String,
     },
     /// Configuration was reloaded (skills, identity, etc.).
     ConfigReloaded,
+    /// A message was sent from one agent to another.
+    AgentMessageSent {
+        from_agent_id: String,
+        to_agent_id: String,
+        link_id: String,
+        channel_id: String,
+    },
+    /// A message was received by an agent from another agent.
+    AgentMessageReceived {
+        from_agent_id: String,
+        to_agent_id: String,
+        link_id: String,
+        channel_id: String,
+    },
+    /// A task was created, updated, or deleted.
+    TaskUpdated {
+        agent_id: String,
+        task_number: i64,
+        status: String,
+        /// "created", "updated", or "deleted".
+        action: String,
+    },
+    /// A finalized content part from an OpenCode worker session.
+    OpenCodePartUpdated {
+        agent_id: String,
+        worker_id: String,
+        part: crate::opencode::types::OpenCodePart,
+    },
 }
 
 impl ApiState {
@@ -179,6 +247,10 @@ impl ApiState {
         provider_setup_tx: mpsc::Sender<crate::ProviderSetupEvent>,
         agent_tx: mpsc::Sender<crate::Agent>,
         agent_remove_tx: mpsc::Sender<String>,
+        injection_tx: mpsc::Sender<crate::ChannelInjection>,
+        task_store_registry: Arc<
+            ArcSwap<std::collections::HashMap<String, Arc<crate::tasks::TaskStore>>>,
+        >,
     ) -> Self {
         let (event_tx, _) = broadcast::channel(512);
         Self {
@@ -195,8 +267,11 @@ impl ApiState {
             config_path: RwLock::new(PathBuf::new()),
             cron_stores: arc_swap::ArcSwap::from_pointee(HashMap::new()),
             cron_schedulers: arc_swap::ArcSwap::from_pointee(HashMap::new()),
+            task_stores: arc_swap::ArcSwap::from_pointee(HashMap::new()),
             runtime_configs: ArcSwap::from_pointee(HashMap::new()),
             mcp_managers: ArcSwap::from_pointee(HashMap::new()),
+            sandboxes: ArcSwap::from_pointee(HashMap::new()),
+            secrets_store: ArcSwap::from_pointee(None),
             discord_permissions: RwLock::new(None),
             slack_permissions: RwLock::new(None),
             bindings: RwLock::new(None),
@@ -210,7 +285,12 @@ impl ApiState {
             defaults_config: RwLock::new(None),
             agent_tx,
             agent_remove_tx,
+            task_store_registry,
+            injection_tx,
             webchat_adapter: ArcSwap::from_pointee(None),
+            agent_links: ArcSwap::from_pointee(Vec::new()),
+            agent_groups: ArcSwap::from_pointee(Vec::new()),
+            agent_humans: ArcSwap::from_pointee(Vec::new()),
         }
     }
 
@@ -259,6 +339,8 @@ impl ApiState {
                                 worker_id,
                                 channel_id,
                                 task,
+                                worker_type,
+                                interactive,
                                 ..
                             } => {
                                 api_tx
@@ -267,6 +349,8 @@ impl ApiState {
                                         channel_id: channel_id.as_deref().map(|s| s.to_string()),
                                         worker_id: worker_id.to_string(),
                                         task: task.clone(),
+                                        worker_type: worker_type.clone(),
+                                        interactive: *interactive,
                                     })
                                     .ok();
                             }
@@ -300,10 +384,24 @@ impl ApiState {
                                     })
                                     .ok();
                             }
+                            ProcessEvent::WorkerIdle {
+                                worker_id,
+                                channel_id,
+                                ..
+                            } => {
+                                api_tx
+                                    .send(ApiEvent::WorkerIdle {
+                                        agent_id: agent_id.clone(),
+                                        channel_id: channel_id.as_deref().map(|s| s.to_string()),
+                                        worker_id: worker_id.to_string(),
+                                    })
+                                    .ok();
+                            }
                             ProcessEvent::WorkerComplete {
                                 worker_id,
                                 channel_id,
                                 result,
+                                success,
                                 ..
                             } => {
                                 api_tx
@@ -312,6 +410,7 @@ impl ApiState {
                                         channel_id: channel_id.as_deref().map(|s| s.to_string()),
                                         worker_id: worker_id.to_string(),
                                         result: result.clone(),
+                                        success: *success,
                                     })
                                     .ok();
                             }
@@ -334,6 +433,7 @@ impl ApiState {
                                 process_id,
                                 channel_id,
                                 tool_name,
+                                args,
                                 ..
                             } => {
                                 let (process_type, id_str) = process_id_info(process_id);
@@ -344,6 +444,7 @@ impl ApiState {
                                         process_type,
                                         process_id: id_str,
                                         tool_name: tool_name.clone(),
+                                        args: args.clone(),
                                     })
                                     .ok();
                             }
@@ -351,6 +452,7 @@ impl ApiState {
                                 process_id,
                                 channel_id,
                                 tool_name,
+                                result,
                                 ..
                             } => {
                                 let (process_type, id_str) = process_id_info(process_id);
@@ -361,16 +463,103 @@ impl ApiState {
                                         process_type,
                                         process_id: id_str,
                                         tool_name: tool_name.clone(),
+                                        result: result.clone(),
+                                    })
+                                    .ok();
+                            }
+                            ProcessEvent::AgentMessageSent {
+                                from_agent_id,
+                                to_agent_id,
+                                link_id,
+                                channel_id,
+                                ..
+                            } => {
+                                api_tx
+                                    .send(ApiEvent::AgentMessageSent {
+                                        from_agent_id: from_agent_id.to_string(),
+                                        to_agent_id: to_agent_id.to_string(),
+                                        link_id: link_id.clone(),
+                                        channel_id: channel_id.to_string(),
+                                    })
+                                    .ok();
+                            }
+                            ProcessEvent::AgentMessageReceived {
+                                from_agent_id,
+                                to_agent_id,
+                                link_id,
+                                channel_id,
+                                ..
+                            } => {
+                                api_tx
+                                    .send(ApiEvent::AgentMessageReceived {
+                                        from_agent_id: from_agent_id.to_string(),
+                                        to_agent_id: to_agent_id.to_string(),
+                                        link_id: link_id.clone(),
+                                        channel_id: channel_id.to_string(),
+                                    })
+                                    .ok();
+                            }
+                            ProcessEvent::TaskUpdated {
+                                task_number,
+                                status,
+                                action,
+                                ..
+                            } => {
+                                api_tx
+                                    .send(ApiEvent::TaskUpdated {
+                                        agent_id: agent_id.clone(),
+                                        task_number: *task_number,
+                                        status: status.clone(),
+                                        action: action.clone(),
+                                    })
+                                    .ok();
+                            }
+                            ProcessEvent::TextDelta {
+                                channel_id: Some(channel_id),
+                                text_delta,
+                                aggregated_text,
+                                ..
+                            } => {
+                                api_tx
+                                    .send(ApiEvent::OutboundMessageDelta {
+                                        agent_id: agent_id.clone(),
+                                        channel_id: channel_id.to_string(),
+                                        text_delta: text_delta.clone(),
+                                        aggregated_text: aggregated_text.clone(),
+                                    })
+                                    .ok();
+                            }
+                            ProcessEvent::OpenCodePartUpdated {
+                                worker_id, part, ..
+                            } => {
+                                api_tx
+                                    .send(ApiEvent::OpenCodePartUpdated {
+                                        agent_id: agent_id.clone(),
+                                        worker_id: worker_id.to_string(),
+                                        part: part.clone(),
                                     })
                                     .ok();
                             }
                             _ => {}
                         }
                     }
-                    Err(broadcast::error::RecvError::Lagged(count)) => {
-                        tracing::debug!(agent_id = %agent_id, count, "API event forwarder lagged, skipped events");
+                    Err(error) => {
+                        match crate::classify_broadcast_recv_result::<crate::ProcessEvent>(Err(
+                            error,
+                        )) {
+                            crate::BroadcastRecvResult::Lagged(count) => {
+                                tracing::debug!(
+                                    agent_id = %agent_id,
+                                    count,
+                                    "API event forwarder lagged, skipped events"
+                                );
+                            }
+                            crate::BroadcastRecvResult::Closed => break,
+                            crate::BroadcastRecvResult::Event(_) => unreachable!(
+                                "classifying an Err recv result should never produce Event"
+                            ),
+                        }
                     }
-                    Err(broadcast::error::RecvError::Closed) => break,
                 }
             }
         });
@@ -417,6 +606,11 @@ impl ApiState {
         self.cron_schedulers.store(Arc::new(schedulers));
     }
 
+    /// Set the task stores for all agents.
+    pub fn set_task_stores(&self, stores: HashMap<String, Arc<TaskStore>>) {
+        self.task_stores.store(Arc::new(stores));
+    }
+
     /// Set the runtime configs for all agents.
     pub fn set_runtime_configs(&self, configs: HashMap<String, Arc<RuntimeConfig>>) {
         self.runtime_configs.store(Arc::new(configs));
@@ -425,6 +619,16 @@ impl ApiState {
     /// Set the MCP managers for all agents.
     pub fn set_mcp_managers(&self, managers: HashMap<String, Arc<McpManager>>) {
         self.mcp_managers.store(Arc::new(managers));
+    }
+
+    /// Set the sandbox instances for all agents.
+    pub fn set_sandboxes(&self, sandboxes: HashMap<String, Arc<crate::sandbox::Sandbox>>) {
+        self.sandboxes.store(Arc::new(sandboxes));
+    }
+
+    /// Set the instance-level secrets store.
+    pub fn set_secrets_store(&self, store: Arc<crate::secrets::store::SecretsStore>) {
+        self.secrets_store.store(Arc::new(Some(store)));
     }
 
     /// Share the Discord permissions ArcSwap with the API so reads get hot-reloaded values.
@@ -475,6 +679,21 @@ impl ApiState {
     /// Set the shared webchat adapter for API handlers.
     pub fn set_webchat_adapter(&self, adapter: Arc<WebChatAdapter>) {
         self.webchat_adapter.store(Arc::new(Some(adapter)));
+    }
+
+    /// Set the agent links for the communication graph.
+    pub fn set_agent_links(&self, links: Vec<crate::links::AgentLink>) {
+        self.agent_links.store(Arc::new(links));
+    }
+
+    /// Set the visual agent groups for the topology UI.
+    pub fn set_agent_groups(&self, groups: Vec<crate::config::GroupDef>) {
+        self.agent_groups.store(Arc::new(groups));
+    }
+
+    /// Set the org-level humans for the topology UI.
+    pub fn set_agent_humans(&self, humans: Vec<crate::config::HumanDef>) {
+        self.agent_humans.store(Arc::new(humans));
     }
 
     /// Send an event to all SSE subscribers.

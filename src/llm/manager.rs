@@ -185,6 +185,8 @@ impl LlmManager {
                 base_url: "https://api.anthropic.com".to_string(),
                 api_key: token,
                 name: None,
+                use_bearer_auth: false,
+                extra_headers: vec![],
             }),
             (None, None) => Err(LlmError::UnknownProvider("anthropic".to_string()).into()),
         }
@@ -193,6 +195,11 @@ impl LlmManager {
     /// Set OpenAI OAuth credentials in memory after successful auth.
     pub async fn set_openai_oauth_credentials(&self, creds: OpenAiOAuthCredentials) {
         *self.openai_oauth_credentials.write().await = Some(creds);
+    }
+
+    /// Clear OpenAI OAuth credentials from memory.
+    pub async fn clear_openai_oauth_credentials(&self) {
+        *self.openai_oauth_credentials.write().await = None;
     }
 
     /// Get OpenAI OAuth access token if available, refreshing when needed.
@@ -248,6 +255,8 @@ impl LlmManager {
                 base_url: "https://chatgpt.com/backend-api/codex".to_string(),
                 api_key: token,
                 name: None,
+                use_bearer_auth: false,
+                extra_headers: vec![],
             }),
             None => Err(LlmError::UnknownProvider("openai-chatgpt".to_string()).into()),
         }

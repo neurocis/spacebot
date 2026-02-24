@@ -17,7 +17,9 @@ This is what makes Spacebot feel like it actually *knows* you. Without the bulle
 
 Bulletin generation is a two-phase process: programmatic retrieval, then LLM synthesis.
 
-On a configurable interval (default: 60 minutes), the cortex:
+When warmup is enabled (default), warmup is the primary bulletin refresher on `warmup.refresh_secs` (default: 15 minutes). The bulletin loop still runs on `bulletin_interval_secs` (default: 60 minutes) as a fallback when warmup is disabled or when the cached bulletin is stale (`bulletin_age_secs >= max(1, warmup.refresh_secs)`).
+
+Each bulletin generation pass does:
 
 1. **Retrieves** memory data across eight predefined sections by querying the memory store directly (no LLM needed for retrieval):
    - Identity & Core Facts — typed search for Identity memories, sorted by importance
@@ -34,7 +36,7 @@ On a configurable interval (default: 60 minutes), the cortex:
 
 This design avoids the problem of an LLM formulating search queries without conversation context. The retrieval phase uses `SearchMode::Typed`, `SearchMode::Recent`, and `SearchMode::Important` — metadata-based modes that query SQLite directly without needing vector embeddings or search terms. The LLM only gets involved for the part it's good at: turning structured data into readable prose.
 
-The first bulletin is generated immediately on startup. Subsequent runs happen every `bulletin_interval_secs`. If a generation fails, the previous bulletin is preserved. If the memory graph is empty, an empty bulletin is stored without invoking the LLM.
+On startup, Spacebot runs a best-effort warmup pass before adapters accept traffic (bounded wait), so the first bulletin is usually already present when the first user message arrives. If generation fails, the previous bulletin is preserved. If the memory graph is empty, an empty bulletin is stored without invoking the LLM.
 
 ### What Channels See
 
@@ -138,6 +140,17 @@ The cortex is the only singleton in the system (per agent). There's one cortex p
 
 **The cortex** is an LLM-assisted process that sees across all channels. It doesn't manage context size (that's the compactor's job). It manages the memory bulletin, and will eventually handle memory coherence and system health.
 
+## Interactive Cortex Chat
+
+Spacebot also exposes a direct admin chat session with the cortex. This is intentionally self-referential and diagnostic-focused:
+
+- The system prompt includes embedded architecture context (`AGENTS.md`) and changelog highlights.
+- The prompt includes a live redacted runtime-config snapshot so behavior can be diagnosed against current resolved values.
+- `config_inspect` returns live hot-reloaded config sections on demand.
+- `spacebot_docs` reads embedded Spacebot docs/changelog/AGENTS content directly from the binary.
+
+This makes cortex chat a practical control-room interface for troubleshooting, validation, and operations — not a user-facing conversation mode.
+
 ## Configuration
 
 ```toml
@@ -151,8 +164,8 @@ bulletin_interval_secs = 3600
 # Target word count for the memory bulletin.
 bulletin_max_words = 500
 
-# Worker is considered hanging if no status update for this long.
-worker_timeout_secs = 300
+# Worker is considered hanging if no activity for this long.
+worker_timeout_secs = 600
 
 # Branch is considered stale after this duration.
 branch_timeout_secs = 60
@@ -223,7 +236,7 @@ Branch, worker, and cron dispatch paths consult a derived `ready_for_work` signa
 
 - warmup state is `warm`
 - embedding model is ready
-- bulletin age is fresh (<= `max(60s, refresh_secs * 2)`)
+- bulletin age is fresh (`<= max(60s, refresh_secs * 2)`)
 
 If dispatch arrives while not ready, Spacebot does **not** block the channel or scheduler:
 

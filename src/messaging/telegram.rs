@@ -1,6 +1,7 @@
 //! Telegram messaging adapter using teloxide.
 
 use crate::config::TelegramPermissions;
+use crate::messaging::apply_runtime_adapter_to_conversation_id;
 use crate::messaging::traits::{InboundStream, Messaging};
 use crate::{Attachment, InboundMessage, MessageContent, OutboundResponse, StatusUpdate};
 
@@ -26,6 +27,7 @@ const REJECTED_USERS_CAPACITY: usize = 50;
 
 /// Telegram adapter state.
 pub struct TelegramAdapter {
+    runtime_key: String,
     permissions: Arc<ArcSwap<TelegramPermissions>>,
     bot: Bot,
     bot_user_id: Arc<RwLock<Option<UserId>>>,
@@ -55,10 +57,16 @@ const FORMATTED_SPLIT_LENGTH: usize = MAX_MESSAGE_LENGTH / 2;
 const STREAM_EDIT_INTERVAL: std::time::Duration = std::time::Duration::from_millis(1000);
 
 impl TelegramAdapter {
-    pub fn new(token: impl Into<String>, permissions: Arc<ArcSwap<TelegramPermissions>>) -> Self {
+    pub fn new(
+        runtime_key: impl Into<String>,
+        token: impl Into<String>,
+        permissions: Arc<ArcSwap<TelegramPermissions>>,
+    ) -> Self {
+        let runtime_key = runtime_key.into();
         let token = token.into();
         let bot = Bot::new(&token);
         Self {
+            runtime_key,
             permissions,
             bot,
             bot_user_id: Arc::new(RwLock::new(None)),
@@ -97,7 +105,7 @@ impl TelegramAdapter {
 
 impl Messaging for TelegramAdapter {
     fn name(&self) -> &str {
-        "telegram"
+        &self.runtime_key
     }
 
     async fn start(&self) -> crate::Result<InboundStream> {
@@ -122,6 +130,7 @@ impl Messaging for TelegramAdapter {
         );
 
         let bot = self.bot.clone();
+        let runtime_key = self.runtime_key.clone();
         let permissions = self.permissions.clone();
         let bot_user_id = self.bot_user_id.clone();
         let bot_username = self.bot_username.clone();
@@ -238,7 +247,11 @@ impl Messaging for TelegramAdapter {
                             }
 
                             let content = build_content(&bot, message, &text).await;
-                            let conversation_id = format!("telegram:{chat_id}");
+                            let base_conversation_id = format!("telegram:{chat_id}");
+                            let conversation_id = apply_runtime_adapter_to_conversation_id(
+                                &runtime_key,
+                                base_conversation_id,
+                            );
                             let sender_id = message
                                 .from
                                 .as_ref()
@@ -253,6 +266,7 @@ impl Messaging for TelegramAdapter {
                             let inbound = InboundMessage {
                                 id: message.id.0.to_string(),
                                 source: "telegram".into(),
+                                adapter: Some(runtime_key.clone()),
                                 conversation_id,
                                 sender_id,
                                 agent_id: None,
@@ -665,6 +679,7 @@ fn extract_attachments(message: &teloxide::types::Message) -> Vec<Attachment> {
                     mime_type: "image/jpeg".into(),
                     url: largest.file.id.to_string(),
                     size_bytes: Some(largest.file.size as u64),
+                    auth_header: None,
                 });
             }
         }
@@ -683,6 +698,7 @@ fn extract_attachments(message: &teloxide::types::Message) -> Vec<Attachment> {
                     .unwrap_or_else(|| "application/octet-stream".into()),
                 url: doc.document.file.id.to_string(),
                 size_bytes: Some(doc.document.file.size as u64),
+                auth_header: None,
             });
         }
         MediaKind::Video(video) => {
@@ -700,6 +716,7 @@ fn extract_attachments(message: &teloxide::types::Message) -> Vec<Attachment> {
                     .unwrap_or_else(|| "video/mp4".into()),
                 url: video.video.file.id.to_string(),
                 size_bytes: Some(video.video.file.size as u64),
+                auth_header: None,
             });
         }
         MediaKind::Voice(voice) => {
@@ -713,6 +730,7 @@ fn extract_attachments(message: &teloxide::types::Message) -> Vec<Attachment> {
                     .unwrap_or_else(|| "audio/ogg".into()),
                 url: voice.voice.file.id.to_string(),
                 size_bytes: Some(voice.voice.file.size as u64),
+                auth_header: None,
             });
         }
         MediaKind::Audio(audio) => {
@@ -730,6 +748,7 @@ fn extract_attachments(message: &teloxide::types::Message) -> Vec<Attachment> {
                     .unwrap_or_else(|| "audio/mpeg".into()),
                 url: audio.audio.file.id.to_string(),
                 size_bytes: Some(audio.audio.file.size as u64),
+                auth_header: None,
             });
         }
         _ => {}
@@ -777,6 +796,10 @@ fn build_metadata(
         "telegram_message_id".into(),
         serde_json::Value::Number(message.id.0.into()),
     );
+    metadata.insert(
+        crate::metadata_keys::MESSAGE_ID.into(),
+        serde_json::Value::String(message.id.0.to_string()),
+    );
 
     let chat_type = if message.chat.is_private() {
         "private"
@@ -793,7 +816,18 @@ fn build_metadata(
 
     if let Some(title) = &message.chat.title() {
         metadata.insert("telegram_chat_title".into(), (*title).into());
+        metadata.insert(crate::metadata_keys::SERVER_NAME.into(), (*title).into());
     }
+    let channel_name = message
+        .chat
+        .title()
+        .map(|title| title.to_string())
+        .or_else(|| message.from.as_ref().map(build_display_name))
+        .unwrap_or_else(|| chat_type.to_string());
+    metadata.insert(
+        crate::metadata_keys::CHANNEL_NAME.into(),
+        channel_name.into(),
+    );
 
     let formatted_author = if let Some(from) = &message.from {
         metadata.insert(
@@ -840,6 +874,17 @@ fn build_metadata(
         }
         if let Some(from) = &reply.from {
             metadata.insert("reply_to_author".into(), build_display_name(from).into());
+            metadata.insert(
+                "reply_to_user_id".into(),
+                serde_json::Value::Number(from.id.0.into()),
+            );
+            metadata.insert(
+                "reply_to_is_bot".into(),
+                serde_json::Value::Bool(from.is_bot),
+            );
+            if let Some(username) = &from.username {
+                metadata.insert("reply_to_username".into(), username.clone().into());
+            }
         }
     }
 

@@ -49,6 +49,7 @@ impl ChannelStore {
                  ON CONFLICT(id) DO UPDATE SET \
                      display_name = COALESCE(excluded.display_name, channels.display_name), \
                      platform_meta = COALESCE(excluded.platform_meta, channels.platform_meta), \
+                     is_active = 1, \
                      last_activity_at = CURRENT_TIMESTAMP"
             )
             .bind(&channel_id)
@@ -80,19 +81,53 @@ impl ChannelStore {
         });
     }
 
-    /// List all active channels, most recently active first.
-    pub async fn list_active(&self) -> crate::error::Result<Vec<ChannelInfo>> {
-        let rows = sqlx::query(
-            "SELECT id, platform, display_name, platform_meta, is_active, created_at, last_activity_at \
-             FROM channels \
-             WHERE is_active = 1 \
-             ORDER BY last_activity_at DESC"
-        )
-        .fetch_all(&self.pool)
-        .await
-        .map_err(|e| anyhow::anyhow!(e))?;
+    /// List channels, most recently active first.
+    ///
+    /// When `is_active_filter` is `Some(true)` or `Some(false)`, filtering is
+    /// pushed into SQL. `None` returns both active and inactive channels.
+    pub async fn list(
+        &self,
+        is_active_filter: Option<bool>,
+    ) -> crate::error::Result<Vec<ChannelInfo>> {
+        let rows = match is_active_filter {
+            Some(true) => {
+                sqlx::query(
+                    "SELECT id, platform, display_name, platform_meta, is_active, created_at, last_activity_at \
+                     FROM channels \
+                     WHERE is_active = 1 \
+                     ORDER BY last_activity_at DESC",
+                )
+                .fetch_all(&self.pool)
+                .await
+            }
+            Some(false) => {
+                sqlx::query(
+                    "SELECT id, platform, display_name, platform_meta, is_active, created_at, last_activity_at \
+                     FROM channels \
+                     WHERE is_active = 0 \
+                     ORDER BY last_activity_at DESC",
+                )
+                .fetch_all(&self.pool)
+                .await
+            }
+            None => {
+                sqlx::query(
+                    "SELECT id, platform, display_name, platform_meta, is_active, created_at, last_activity_at \
+                     FROM channels \
+                     ORDER BY last_activity_at DESC",
+                )
+                .fetch_all(&self.pool)
+                .await
+            }
+        }
+        .map_err(|error| anyhow::anyhow!(error))?;
 
         Ok(rows.into_iter().map(row_to_channel_info).collect())
+    }
+
+    /// List all active channels, most recently active first.
+    pub async fn list_active(&self) -> crate::error::Result<Vec<ChannelInfo>> {
+        self.list(Some(true)).await
     }
 
     /// Find a channel by partial name or ID match.
@@ -160,6 +195,40 @@ impl ChannelStore {
             .flatten()
             .and_then(|c| c.display_name)
     }
+
+    /// Delete a channel and its message history.
+    /// Branch/worker runs are cascade-deleted via FK constraints.
+    pub async fn delete(&self, channel_id: &str) -> crate::error::Result<bool> {
+        let mut tx = self.pool.begin().await.map_err(|e| anyhow::anyhow!(e))?;
+
+        sqlx::query("DELETE FROM conversation_messages WHERE channel_id = ?")
+            .bind(channel_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| anyhow::anyhow!(e))?;
+
+        let result = sqlx::query("DELETE FROM channels WHERE id = ?")
+            .bind(channel_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| anyhow::anyhow!(e))?;
+
+        tx.commit().await.map_err(|e| anyhow::anyhow!(e))?;
+
+        Ok(result.rows_affected() > 0)
+    }
+
+    /// Set active/archive state for a channel.
+    pub async fn set_active(&self, channel_id: &str, active: bool) -> crate::error::Result<bool> {
+        let result = sqlx::query("UPDATE channels SET is_active = ? WHERE id = ?")
+            .bind(if active { 1_i64 } else { 0_i64 })
+            .bind(channel_id)
+            .execute(&self.pool)
+            .await
+            .map_err(|e| anyhow::anyhow!(e))?;
+
+        Ok(result.rows_affected() > 0)
+    }
 }
 
 fn row_to_channel_info(row: sqlx::sqlite::SqliteRow) -> ChannelInfo {
@@ -193,33 +262,22 @@ fn extract_platform(channel_id: &str) -> String {
 }
 
 /// Pull the best display name from inbound message metadata.
+///
+/// Adapters set `channel_name` with display-ready values (e.g. `#general`
+/// for Slack, `Email: subject` for email). Portal is the only platform
+/// without adapter-set metadata, so it uses a hardcoded fallback.
 fn extract_display_name(
     platform: &str,
-    channel_id: &str,
+    _channel_id: &str,
     metadata: &HashMap<String, serde_json::Value>,
 ) -> Option<String> {
-    match platform {
-        "discord" => metadata
-            .get("discord_channel_name")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string()),
-        "slack" => metadata
-            .get("slack_channel_name")
-            .and_then(|v| v.as_str())
-            .map(|name| {
-                if channel_id.contains(":D") || name.starts_with("dm-") {
-                    name.to_string()
-                } else {
-                    format!("#{name}")
-                }
-            }),
-        "telegram" => metadata
-            .get("display_name")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string()),
-        "portal" => Some("portal:chat".to_string()),
-        _ => None,
+    if platform == "portal" {
+        return Some("portal:chat".to_string());
     }
+    metadata
+        .get(crate::metadata_keys::CHANNEL_NAME)
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
 }
 
 /// Build a JSON blob of platform-specific metadata worth persisting.
@@ -262,6 +320,22 @@ fn extract_platform_meta(
                 meta.insert("twitch_channel".to_string(), value.clone());
             }
         }
+        "email" => {
+            for key in [
+                "email_from",
+                "email_reply_to",
+                "email_to",
+                "email_subject",
+                "email_message_id",
+                "email_in_reply_to",
+                "email_references",
+                "email_thread_key",
+            ] {
+                if let Some(value) = metadata.get(key) {
+                    meta.insert(key.to_string(), value.clone());
+                }
+            }
+        }
         _ => {}
     }
 
@@ -269,5 +343,120 @@ fn extract_platform_meta(
         None
     } else {
         serde_json::to_string(&serde_json::Value::Object(meta)).ok()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use sqlx::sqlite::SqlitePoolOptions;
+
+    async fn setup_store() -> ChannelStore {
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .expect("in-memory sqlite should connect");
+
+        sqlx::query(
+            r#"
+            CREATE TABLE channels (
+                id TEXT PRIMARY KEY,
+                platform TEXT NOT NULL,
+                display_name TEXT,
+                platform_meta TEXT,
+                is_active INTEGER NOT NULL DEFAULT 1,
+                created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                last_activity_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )
+            "#,
+        )
+        .execute(&pool)
+        .await
+        .expect("channels table should create");
+
+        ChannelStore::new(pool)
+    }
+
+    #[tokio::test]
+    async fn list_is_active_filter_controls_visibility() {
+        let store = setup_store().await;
+
+        sqlx::query(
+            "INSERT INTO channels (id, platform, is_active, created_at, last_activity_at) VALUES (?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
+        )
+        .bind("active-channel")
+        .bind("portal")
+        .bind(1_i64)
+        .execute(&store.pool)
+        .await
+        .expect("active channel should insert");
+
+        sqlx::query(
+            "INSERT INTO channels (id, platform, is_active, created_at, last_activity_at) VALUES (?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
+        )
+        .bind("archived-channel")
+        .bind("portal")
+        .bind(0_i64)
+        .execute(&store.pool)
+        .await
+        .expect("archived channel should insert");
+
+        let active_only = store.list(Some(true)).await.expect("list should succeed");
+        assert_eq!(active_only.len(), 1);
+        assert_eq!(active_only[0].id, "active-channel");
+
+        let archived_only = store.list(Some(false)).await.expect("list should succeed");
+        assert_eq!(archived_only.len(), 1);
+        assert_eq!(archived_only[0].id, "archived-channel");
+
+        let all = store.list(None).await.expect("list should succeed");
+        assert_eq!(all.len(), 2);
+        assert!(all.iter().any(|c| c.id == "active-channel" && c.is_active));
+        assert!(
+            all.iter()
+                .any(|c| c.id == "archived-channel" && !c.is_active)
+        );
+    }
+
+    #[tokio::test]
+    async fn set_active_toggles_channel_state_without_deleting() {
+        let store = setup_store().await;
+
+        sqlx::query(
+            "INSERT INTO channels (id, platform, is_active, created_at, last_activity_at) VALUES (?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
+        )
+        .bind("chan-1")
+        .bind("portal")
+        .bind(1_i64)
+        .execute(&store.pool)
+        .await
+        .expect("channel should insert");
+
+        let archived = store
+            .set_active("chan-1", false)
+            .await
+            .expect("set_active should succeed");
+        assert!(archived, "existing channel should be updated");
+
+        let channel = store
+            .get("chan-1")
+            .await
+            .expect("get should succeed")
+            .expect("channel should still exist");
+        assert!(!channel.is_active);
+
+        let unarchived = store
+            .set_active("chan-1", true)
+            .await
+            .expect("set_active should succeed");
+        assert!(unarchived, "existing channel should be updated");
+
+        let channel = store
+            .get("chan-1")
+            .await
+            .expect("get should succeed")
+            .expect("channel should still exist");
+        assert!(channel.is_active);
     }
 }

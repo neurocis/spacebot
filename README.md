@@ -20,6 +20,8 @@
   <a href="https://discord.gg/gTaF2Z44f5">
     <img src="https://img.shields.io/discord/949090953497567312?label=Discord&color=5865F2" />
   </a>
+
+  [![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/spacedriveapp/spacebot)
 </p>
 
 <p align="center">
@@ -119,7 +121,8 @@ Every memory has a type, an importance score, and graph edges connecting it to r
 Cron jobs created and managed from conversation or config:
 
 - **Natural scheduling** — "check my inbox every 30 minutes" becomes a cron job with a delivery target
-- **Clock-aligned intervals** — sub-daily intervals snap to UTC boundaries so jobs fire on clean marks (e.g. every 30 min fires at :00 and :30)
+- **Strict wall-clock schedules** — use cron expressions for exact local-time execution (for example, `0 9 * * *` for 9:00 every day)
+- **Legacy interval compatibility** — existing `interval_secs` jobs still run and remain configurable
 - **Configurable timeouts** — per-job `timeout_secs` to cap execution time (defaults to 120s)
 - **Active hours** — restrict jobs to specific time windows (supports midnight wrapping)
 - **Circuit breaker** — auto-disables after 3 consecutive failures
@@ -184,7 +187,7 @@ coding = "ollama/qwen3"
 
 ```toml
 [llm.provider.my-provider]
-api_type = "openai_completions"  # or "anthropic"
+api_type = "openai_completions"  # or "openai_chat_completions", "openai_responses", "anthropic"
 base_url = "https://my-llm-host.example.com"
 api_key = "env:MY_PROVIDER_KEY"
 
@@ -192,7 +195,7 @@ api_key = "env:MY_PROVIDER_KEY"
 channel = "my-provider/my-model"
 ```
 
-Additional built-in providers include **NVIDIA**, **MiniMax**, **Moonshot AI (Kimi)**, and **Z.AI Coding Plan** — configure with `nvidia_key`, `minimax_key`, `moonshot_key`, or `zai_coding_plan_key` in `[llm]`.
+Additional built-in providers include **Kilo Gateway**, **OpenCode Go**, **NVIDIA**, **MiniMax**, **Moonshot AI (Kimi)**, and **Z.AI Coding Plan** — configure with `kilo_key`, `opencode_go_key`, `nvidia_key`, `minimax_key`, `moonshot_key`, or `zai_coding_plan_key` in `[llm]`.
 
 ### Skills
 
@@ -235,6 +238,39 @@ name = "sentry"
 transport = "http"
 url = "https://mcp.sentry.io"
 headers = { Authorization = "Bearer ${SENTRY_TOKEN}" }
+```
+
+### Security
+
+Spacebot runs autonomous LLM processes that execute arbitrary shell commands and spawn subprocesses. Security isn't an add-on — it's a layered system designed so that no single failure exposes credentials or breaks containment.
+
+#### Credential Isolation
+
+Secrets are split into two categories: **system** (LLM API keys, messaging tokens — never exposed to subprocesses) and **tool** (CLI credentials like `GH_TOKEN` — injected as env vars into workers). The category is auto-assigned based on the secret name, or set explicitly.
+
+- **Environment sanitization** — every subprocess starts with a clean environment (`--clearenv` on Linux, `env_clear()` everywhere else). Only safe baseline vars (`PATH`, `HOME`, `LANG`), tool-category secrets, and explicit `passthrough_env` entries are present. In sandbox mode, `HOME` is set to the workspace; in passthrough mode, `HOME` uses the parent environment. System secrets never enter any subprocess
+- **Secret store** — credentials live in a dedicated redb database, not in `config.toml`. Config references secrets by alias (`anthropic_key = "secret:ANTHROPIC_API_KEY"`), so the config file is safe to display, screenshot, or `cat`
+- **Encryption at rest** — optional AES-256-GCM encryption with a master key derived via Argon2id. The master key lives in the OS credential store (macOS Keychain, Linux kernel keyring) — never on disk, never in an env var, never accessible to worker subprocesses
+- **Keyring isolation** — on Linux, workers are spawned with a fresh empty session keyring via `pre_exec`. Even without the sandbox, workers cannot access the parent's kernel keyring where the master key lives
+- **Output scrubbing** — all tool secret values are redacted from worker output before it reaches channels or LLM context. A rolling buffer handles secrets split across stream chunks. Channels see `[REDACTED]`, never raw values
+- **Worker secret management** — workers can store credentials they obtain (API keys from account creation, OAuth tokens) via the `secret_set` tool. Stored secrets are immediately available to future workers
+
+#### Process Containment
+
+- **Process sandbox** — shell and exec tools run inside OS-level filesystem containment. On Linux, [bubblewrap](https://github.com/containers/bubblewrap) creates a mount namespace where the entire filesystem is read-only except the agent's workspace and configured writable paths. On macOS, `sandbox-exec` enforces equivalent restrictions via SBPL profiles. Kernel-enforced, not string-filtered
+- **Dynamic sandbox mode** — sandbox settings are hot-reloadable. Toggle via the dashboard or API without restarting the agent
+- **Workspace isolation** — file tools canonicalize all paths and reject anything outside the agent's workspace. Symlinks that escape are blocked
+- **Leak detection** — secret-pattern checks are enforced at channel egress (`reply` and plaintext fallback output) across plaintext, URL-encoded, base64, and hex encodings. Outbound text matching a secret pattern is blocked; worker tool outputs no longer hard-fail the worker
+- **Library injection blocking** — the exec tool blocks dangerous environment variables (`LD_PRELOAD`, `DYLD_INSERT_LIBRARIES`, `NODE_OPTIONS`, etc.) that could hijack child process loading
+- **SSRF protection** — the browser tool blocks requests to cloud metadata endpoints, private IPs, loopback, and link-local addresses
+- **Identity file protection** — writes to `SOUL.md`, `IDENTITY.md`, and `USER.md` are blocked at the application level
+- **Durable binary storage** — `tools/bin` directory on PATH survives hosted rollouts. Workers are instructed to install binaries there instead of ephemeral package manager locations
+
+```toml
+[agents.sandbox]
+mode = "enabled"                              # "enabled" (default) or "disabled"
+writable_paths = ["/home/user/projects/myapp"] # additional writable dirs beyond workspace
+passthrough_env = ["CUSTOM_VAR"]              # forward specific env vars to workers
 ```
 
 ---
@@ -355,9 +391,9 @@ Memories are structured objects, not files. Every memory is a row in SQLite with
 
 Scheduled recurring tasks. Each cron job gets a fresh short-lived channel with full branching and worker capabilities.
 
-- Multiple cron jobs run independently at different intervals
+- Multiple cron jobs run independently on wall-clock schedules (or legacy intervals)
 - Stored in the database, created via config, conversation, or programmatically
-- Clock-aligned intervals snap to UTC boundaries for predictable firing times
+- Cron expressions execute against the resolved cron timezone for predictable local-time firing
 - Per-job `timeout_secs` to cap execution time
 - Circuit breaker auto-disables after 3 consecutive failures
 - Active hours support with midnight wrapping
@@ -381,7 +417,7 @@ Read the full vision in the [roadmap](docs/content/docs/(deployment)/roadmap.mdx
 ### Prerequisites
 
 - **Rust** 1.85+ ([rustup](https://rustup.rs/))
-- An LLM API key from any supported provider (Anthropic, OpenAI, OpenRouter, Z.ai, Groq, Together, Fireworks, DeepSeek, xAI, Mistral, NVIDIA, MiniMax, Moonshot AI, OpenCode Zen) — or use `spacebot auth login` for Anthropic OAuth
+- An LLM API key from any supported provider (Anthropic, OpenAI, OpenRouter, Kilo Gateway, Z.ai, Groq, Together, Fireworks, DeepSeek, xAI, Mistral, NVIDIA, MiniMax, Moonshot AI, OpenCode Zen, OpenCode Go) — or use `spacebot auth login` for Anthropic OAuth
 
 ### Build and Run
 
@@ -413,6 +449,12 @@ token = "env:DISCORD_BOT_TOKEN"
 agent_id = "my-agent"
 channel = "discord"
 guild_id = "your-discord-guild-id"
+
+# Optional: route a named adapter instance
+[[bindings]]
+agent_id = "my-agent"
+channel = "discord"
+adapter = "ops"
 ```
 
 ```bash
@@ -448,7 +490,7 @@ OAuth tokens are stored in `anthropic_oauth.json` and auto-refresh transparently
 | --------------- | --------------------------------------------------------------------------------------------------------------- |
 | Language        | **Rust** (edition 2024)                                                                                         |
 | Async runtime   | **Tokio**                                                                                                       |
-| LLM framework   | **[Rig](https://github.com/0xPlaygrounds/rig)** v0.30 — agentic loop, tool execution, hooks                     |
+| LLM framework   | **[Rig](https://github.com/0xPlaygrounds/rig)** v0.31 — agentic loop, tool execution, hooks                     |
 | Relational data | **SQLite** (sqlx) — conversations, memory graph, cron jobs                                                      |
 | Vector + FTS    | **[LanceDB](https://lancedb.github.io/lancedb/)** — embeddings (HNSW), full-text (Tantivy), hybrid search (RRF) |
 | Key-value       | **[redb](https://github.com/cberner/redb)** — settings, encrypted secrets                                       |
@@ -478,6 +520,8 @@ No server dependencies. Single binary. All data lives in embedded databases in a
 | [Cortex](docs/content/docs/(core)/cortex.mdx)                    | Memory bulletin and system observation                   |
 | [Cron Jobs](docs/content/docs/(features)/cron.mdx)               | Scheduled recurring tasks                                |
 | [Routing](docs/content/docs/(core)/routing.mdx)                  | Model routing and fallback chains                        |
+| [Secrets](docs/content/docs/(configuration)/secrets.mdx)         | Credential storage, encryption, and output scrubbing     |
+| [Sandbox](docs/content/docs/(configuration)/sandbox.mdx)         | Process containment and environment sanitization         |
 | [Messaging](docs/content/docs/(messaging)/messaging.mdx)         | Adapter architecture (Discord, Slack, Telegram, Twitch, Webchat, webhook) |
 | [Discord Setup](docs/content/docs/(messaging)/discord-setup.mdx) | Discord bot setup guide                                  |
 | [Browser](docs/content/docs/(features)/browser.mdx)              | Headless Chrome for workers                              |
@@ -503,11 +547,13 @@ Contributions welcome. Read [RUST_STYLE_GUIDE.md](RUST_STYLE_GUIDE.md) before wr
 
 1. Fork the repo
 2. Create a feature branch
-3. Run `./scripts/install-git-hooks.sh` once (installs pre-commit formatting hook)
-4. Make your changes
-5. Submit a PR
+3. Install `just` (https://github.com/casey/just) if it is not already available (for example: `brew install just` or `cargo install just --locked`)
+4. Run `./scripts/install-git-hooks.sh` once (installs pre-commit formatting hook)
+5. Make your changes
+6. Run `just preflight` and `just gate-pr`
+7. Submit a PR
 
-Formatting is still enforced in CI, but the hook catches it earlier by running `cargo fmt --all` before each commit.
+Formatting is still enforced in CI, but the hook catches it earlier by running `cargo fmt --all` before each commit. `just gate-pr` mirrors the CI gate and includes migration safety, compile checks, and test verification.
 
 ---
 
