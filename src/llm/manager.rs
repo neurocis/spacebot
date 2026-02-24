@@ -287,7 +287,7 @@ impl LlmManager {
     /// Format: "provider/model-name" or just "model-name" (defaults to openai for voice models).
     pub fn resolve_model(&self, model_name: &str) -> Result<(String, String)> {
         if let Some((provider, model)) = model_name.split_once('/') {
-            tracing::debug!(provider = %provider, model = %model_name, "resolved model with explicit provider");
+            tracing::debug!(provider = %provider, model = %model, "resolved model with explicit provider");
             Ok((provider.to_string(), model.to_string()))
         } else {
             // Default to openai for voice models (most common for Whisper/vision)
