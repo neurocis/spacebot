@@ -1179,7 +1179,8 @@ impl Channel {
                 .get("telegram_bot_username")
                 .and_then(|v| v.as_str())
                 .map(|u| format!("@{u}"))
-                .unwrap_or_default();
+                .unwrap_or_default()
+                .to_lowercase();
             let has_mention = !mention.is_empty() && text.contains(&mention);
             let looks_like_ping = text.contains("you here")
                 || text.contains("ping")
@@ -1250,12 +1251,6 @@ impl Channel {
         let temporal_context = TemporalContext::from_runtime(self.deps.runtime_config.as_ref());
         let message_timestamp = temporal_context.format_timestamp(message.timestamp);
         let user_text = format_user_message(&rewritten_text, &message, &message_timestamp);
-
-        let attachment_content = if !attachments.is_empty() {
-            download_attachments(&self.deps, &attachments).await
-        } else {
-            Vec::new()
-        };
 
         // Persist user messages (skip system re-triggers)
         if message.source != "system" {
@@ -1338,6 +1333,11 @@ impl Channel {
         }
 
         let is_retrigger = message.source == "system";
+        let attachment_content = if !attachments.is_empty() {
+            download_attachments(&self.deps, &attachments).await
+        } else {
+            Vec::new()
+        };
 
         let (result, skip_flag, replied_flag, retrigger_reply_preserved) = self
             .run_agent_turn(

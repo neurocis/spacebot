@@ -261,12 +261,12 @@ async fn handle_message_event(
     )
     .await;
     let mut metadata = metadata;
+    let bot_mention = format!("<@{}>", adapter_state.bot_user_id);
     let mentioned_bot = msg_event
         .content
         .as_ref()
         .and_then(|content| content.text.as_ref())
-        .as_ref()
-        .map(|text| text.contains(&format!("<@{}>", adapter_state.bot_user_id)))
+        .map(|text| text.contains(&bot_mention))
         .unwrap_or(false);
     let replied_to_bot = if let Some(thread_ts) = msg_event.origin.thread_ts.as_ref() {
         // For threaded replies, treat as explicit invoke only when the thread
