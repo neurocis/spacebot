@@ -424,8 +424,21 @@ impl Channel {
                     .get("telegram_bot_username")
                     .and_then(|v| v.as_str())
                     .map(|username| {
-                        let mention = format!("@{username}").to_lowercase();
-                        text_lower.contains(&mention)
+                        let mention = format!("@{}", username.to_lowercase());
+                        text_lower.match_indices(&mention).any(|(start, _)| {
+                            let end = start + mention.len();
+                            let before_ok = start == 0
+                                || text_lower[..start].chars().next_back().is_none_or(
+                                    |character| {
+                                        !(character.is_ascii_alphanumeric() || character == '_')
+                                    },
+                                );
+                            let after_ok = end == text_lower.len()
+                                || text_lower[end..].chars().next().is_none_or(|character| {
+                                    !(character.is_ascii_alphanumeric() || character == '_')
+                                });
+                            before_ok && after_ok
+                        })
                     })
                     .unwrap_or(false)
             }

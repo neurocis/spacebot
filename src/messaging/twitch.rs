@@ -310,9 +310,16 @@ impl Messaging for TwitchAdapter {
                             let after_ok = after.map(|character| !is_login_char(character)).unwrap_or(true);
                             before_ok && after_ok
                         });
+                        let replies_to_bot = privmsg
+                            .source
+                            .tags
+                            .0
+                            .get("reply-parent-msg-id")
+                            .and_then(|value| value.as_ref())
+                            .is_some_and(|value| !value.is_empty());
                         metadata.insert(
                             "twitch_mentions_or_replies_to_bot".into(),
-                            serde_json::Value::Bool(mentions_bot),
+                            serde_json::Value::Bool(mentions_bot || replies_to_bot),
                         );
 
                         let formatted_author = format!(
