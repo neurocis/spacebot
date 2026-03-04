@@ -21,6 +21,7 @@ WORKDIR /build
 # 1. Fetch and cache Rust dependencies.
 #    cargo fetch needs a valid target, so we create stubs that get replaced later.
 COPY Cargo.toml Cargo.lock ./
+COPY vendor/ vendor/
 RUN mkdir src && echo "fn main() {}" > src/main.rs && touch src/lib.rs \
     && cargo build --release \
     && rm -rf src
@@ -35,9 +36,13 @@ RUN cd interface && bun run build
 #    build.rs runs the frontend build (already done above, node_modules present).
 #    prompts/ is needed for include_str! in src/prompts/text.rs.
 #    migrations/ is needed for sqlx::migrate! in src/db.rs.
+#    docs/ is needed for rust-embed in src/self_awareness.rs.
+#    AGENTS.md, README.md, CHANGELOG.md are needed for include_str! in src/self_awareness.rs.
 COPY build.rs ./
 COPY prompts/ prompts/
 COPY migrations/ migrations/
+COPY docs/ docs/
+COPY AGENTS.md README.md CHANGELOG.md ./
 COPY src/ src/
 RUN SPACEBOT_SKIP_FRONTEND_BUILD=1 cargo build --release \
     && mv /build/target/release/spacebot /usr/local/bin/spacebot \
