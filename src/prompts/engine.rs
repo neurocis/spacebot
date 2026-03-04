@@ -76,6 +76,10 @@ impl PromptEngine {
             crate::prompts::text::get("adapters/email"),
         )?;
         env.add_template("adapters/cron", crate::prompts::text::get("adapters/cron"))?;
+        env.add_template(
+            "adapters/signal",
+            crate::prompts::text::get("adapters/signal"),
+        )?;
 
         // Fragment templates
         env.add_template(
@@ -471,6 +475,7 @@ impl PromptEngine {
         let template_name = match adapter {
             "email" => "adapters/email",
             "cron" => "adapters/cron",
+            "signal" => "adapters/signal",
             _ => return None,
         };
 
