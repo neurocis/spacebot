@@ -482,12 +482,12 @@ impl OutboundResponse {
     /// readable plaintext fallback from cards so adapters that don't support
     /// rich formatting (or use `text` for notifications) always have content.
     pub fn ensure_text_fallback(&mut self) {
-        if let OutboundResponse::RichMessage { text, cards, .. } = self {
-            if text.trim().is_empty() {
-                let derived = Self::text_from_cards(cards);
-                if !derived.trim().is_empty() {
-                    *text = derived;
-                }
+        if let OutboundResponse::RichMessage { text, cards, .. } = self
+            && text.trim().is_empty()
+        {
+            let derived = Self::text_from_cards(cards);
+            if !derived.trim().is_empty() {
+                *text = derived;
             }
         }
     }
