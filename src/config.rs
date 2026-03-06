@@ -12,6 +12,7 @@ mod watcher;
 // Re-export all public types from submodules so external consumers
 // continue to use `crate::config::TypeName` unchanged.
 pub use load::set_resolve_secrets_store;
+pub(crate) use load::resolve_env_value;
 pub use onboarding::run_onboarding;
 pub use permissions::{
     DiscordPermissions, SlackPermissions, TelegramPermissions, TwitchPermissions,

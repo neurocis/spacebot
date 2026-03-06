@@ -364,27 +364,8 @@ impl McpConnection {
                     .custom_headers(custom_headers);
 
                 if let Some(auth_value) = auth_header_value {
-                    // rmcp's auth_header() uses reqwest's .bearer_auth()
-                    // which always prepends "Bearer ". Reject non-Bearer
-                    // schemes (e.g. "Basic ...") that would produce a
-                    // malformed "Bearer Basic ..." header.
-                    let has_scheme = auth_value.contains(' ')
-                        && !auth_value.starts_with("Bearer ")
-                        && !auth_value.starts_with("bearer ");
-                    if has_scheme {
-                        anyhow::bail!(
-                            "unsupported Authorization scheme for mcp server '{}': \
-                             only Bearer tokens are supported (rmcp always sends \
-                             Bearer auth). Remove the scheme prefix or use a \
-                             Bearer token.",
-                            self.name
-                        );
-                    }
-                    let token = auth_value
-                        .strip_prefix("Bearer ")
-                        .or_else(|| auth_value.strip_prefix("bearer "))
-                        .unwrap_or(&auth_value);
-                    transport_config = transport_config.auth_header(token);
+                    let token = parse_bearer_token(&auth_value, &self.name)?;
+                    transport_config = transport_config.auth_header(&token);
                 }
 
                 let transport =
@@ -674,6 +655,48 @@ impl McpManager {
     }
 }
 
+/// Parse a Bearer token from an Authorization header value.
+///
+/// rmcp's `auth_header()` uses reqwest's `.bearer_auth()` which always
+/// prepends `"Bearer "`. This function strips any `Bearer` prefix
+/// (case-insensitive) and rejects non-Bearer schemes and empty tokens.
+fn parse_bearer_token(auth_value: &str, server_name: &str) -> anyhow::Result<String> {
+    let trimmed = auth_value.trim();
+    if trimmed.is_empty() {
+        anyhow::bail!(
+            "empty Authorization header value for mcp server '{server_name}'"
+        );
+    }
+
+    // Check if the value starts with a known scheme word (case-insensitive).
+    // We split on the first space to detect "Bearer <token>" vs "Basic ..." etc.
+    if let Some(space_pos) = trimmed.find(' ') {
+        let scheme = &trimmed[..space_pos];
+        if !scheme.eq_ignore_ascii_case("Bearer") {
+            anyhow::bail!(
+                "unsupported Authorization scheme '{scheme}' for mcp server \
+                 '{server_name}': only Bearer tokens are supported (rmcp always \
+                 sends Bearer auth). Remove the scheme prefix or use a Bearer token."
+            );
+        }
+        let token = trimmed[space_pos + 1..].trim();
+        if token.is_empty() {
+            anyhow::bail!(
+                "empty Bearer token value for mcp server '{server_name}'"
+            );
+        }
+        Ok(token.to_string())
+    } else if trimmed.eq_ignore_ascii_case("Bearer") {
+        // Bare "Bearer" with no token value.
+        anyhow::bail!(
+            "empty Bearer token value for mcp server '{server_name}'"
+        );
+    } else {
+        // Raw token with no scheme prefix — pass through as-is.
+        Ok(trimmed.to_string())
+    }
+}
+
 fn service_error_to_anyhow(error: ServiceError) -> anyhow::Error {
     anyhow!(error.to_string())
 }
@@ -697,7 +720,12 @@ fn interpolate_env_placeholders(value: &str) -> String {
         if var_name.is_empty() {
             output.push_str("${}");
         } else {
-            let resolved = std::env::var(var_name).unwrap_or_default();
+            let resolved = std::env::var(var_name)
+                .ok()
+                .or_else(|| {
+                    crate::config::resolve_env_value(&format!("secret:{var_name}"))
+                })
+                .unwrap_or_default();
             output.push_str(&resolved);
         }
 
@@ -706,4 +734,65 @@ fn interpolate_env_placeholders(value: &str) -> String {
 
     output.push_str(&value[cursor..]);
     output
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_bearer_token_strips_bearer_prefix() {
+        let token = parse_bearer_token("Bearer abc123", "test").unwrap();
+        assert_eq!(token, "abc123");
+    }
+
+    #[test]
+    fn parse_bearer_token_case_insensitive() {
+        assert_eq!(parse_bearer_token("bearer abc", "test").unwrap(), "abc");
+        assert_eq!(parse_bearer_token("BEARER abc", "test").unwrap(), "abc");
+        assert_eq!(parse_bearer_token("BeArEr abc", "test").unwrap(), "abc");
+    }
+
+    #[test]
+    fn parse_bearer_token_raw_token_passthrough() {
+        let token = parse_bearer_token("abc123", "test").unwrap();
+        assert_eq!(token, "abc123");
+    }
+
+    #[test]
+    fn parse_bearer_token_rejects_non_bearer_scheme() {
+        let err = parse_bearer_token("Basic dXNlcjpwYXNz", "myserver").unwrap_err();
+        assert!(err.to_string().contains("unsupported Authorization scheme 'Basic'"));
+        assert!(err.to_string().contains("myserver"));
+    }
+
+    #[test]
+    fn parse_bearer_token_rejects_empty_value() {
+        assert!(parse_bearer_token("", "test").is_err());
+        assert!(parse_bearer_token("   ", "test").is_err());
+    }
+
+    #[test]
+    fn parse_bearer_token_rejects_empty_bearer_value() {
+        let err = parse_bearer_token("Bearer ", "test").unwrap_err();
+        assert!(err.to_string().contains("empty Bearer token"));
+    }
+
+    #[test]
+    fn parse_bearer_token_trims_whitespace() {
+        assert_eq!(parse_bearer_token("  Bearer abc  ", "test").unwrap(), "abc");
+        assert_eq!(parse_bearer_token("  raw_token  ", "test").unwrap(), "raw_token");
+    }
+
+    #[test]
+    fn interpolate_env_placeholders_no_placeholders() {
+        assert_eq!(interpolate_env_placeholders("hello world"), "hello world");
+    }
+
+    #[test]
+    fn interpolate_env_placeholders_literal_passthrough() {
+        assert_eq!(interpolate_env_placeholders("no-vars-here"), "no-vars-here");
+        assert_eq!(interpolate_env_placeholders("${"), "${");
+        assert_eq!(interpolate_env_placeholders("${}"), "${}");
+    }
 }
