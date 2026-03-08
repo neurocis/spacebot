@@ -974,6 +974,26 @@ export interface RegistrySearchResponse {
 	count: number;
 }
 
+export interface SkillContentResponse {
+	name: string;
+	description: string;
+	content: string;
+	file_path: string;
+	base_dir: string;
+	source: string;
+	source_repo?: string;
+}
+
+export interface UploadSkillResponse {
+	installed: string[];
+}
+
+export interface RegistrySkillContentResponse {
+	source: string;
+	skill_id: string;
+	content: string | null;
+}
+
 // -- Task Types --
 
 export type TaskStatus = "pending_approval" | "backlog" | "ready" | "in_progress" | "done";
@@ -2020,6 +2040,26 @@ export const api = {
 		return response.json() as Promise<RemoveSkillResponse>;
 	},
 
+	getSkillContent: (agentId: string, name: string) =>
+		fetchJson<SkillContentResponse>(
+			`/agents/skills/content?agent_id=${encodeURIComponent(agentId)}&name=${encodeURIComponent(name)}`,
+		),
+
+	uploadSkillFiles: async (agentId: string, files: File[]) => {
+		const form = new FormData();
+		for (const file of files) {
+			form.append("file", file);
+		}
+		const response = await fetch(
+			`${API_BASE}/agents/skills/upload?agent_id=${encodeURIComponent(agentId)}`,
+			{ method: "POST", body: form },
+		);
+		if (!response.ok) {
+			throw new Error(`API error: ${response.status}`);
+		}
+		return response.json() as Promise<UploadSkillResponse>;
+	},
+
 	// Skills Registry API (skills.sh proxy)
 	registryBrowse: (view: RegistryView = "all-time", page = 0) =>
 		fetchJson<RegistryBrowseResponse>(
@@ -2029,6 +2069,11 @@ export const api = {
 	registrySearch: (query: string, limit = 50) =>
 		fetchJson<RegistrySearchResponse>(
 			`/skills/registry/search?q=${encodeURIComponent(query)}&limit=${limit}`,
+		),
+
+	registrySkillContent: (source: string, skillId: string) =>
+		fetchJson<RegistrySkillContentResponse>(
+			`/skills/registry/content?source=${encodeURIComponent(source)}&skill_id=${encodeURIComponent(skillId)}`,
 		),
 
 	// Agent Links & Topology API

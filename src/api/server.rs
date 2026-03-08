@@ -173,7 +173,9 @@ pub async fn start_http_server(
         )
         .route("/agents/ingest/upload", post(ingest::upload_ingest_file))
         .route("/agents/skills", get(skills::list_skills))
+        .route("/agents/skills/content", get(skills::get_skill_content))
         .route("/agents/skills/install", post(skills::install_skill))
+        .route("/agents/skills/upload", post(skills::upload_skill))
         .route("/agents/skills/remove", delete(skills::remove_skill))
         .route("/agents/tools", get(tools::list_tools))
         // Secret store management
@@ -193,6 +195,10 @@ pub async fn start_http_server(
         .route("/secrets/import", post(secrets::import_secrets))
         .route("/skills/registry/browse", get(skills::registry_browse))
         .route("/skills/registry/search", get(skills::registry_search))
+        .route(
+            "/skills/registry/content",
+            get(skills::registry_skill_content),
+        )
         .route(
             "/providers",
             get(providers::get_providers).put(providers::update_provider),

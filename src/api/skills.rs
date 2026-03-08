@@ -8,11 +8,21 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::sync::LazyLock;
 use std::time::Duration;
+use tokio::io::AsyncWriteExt;
 
 const REGISTRY_SKILL_DESCRIPTION_CACHE_CAPACITY: u64 = 10_000;
 const REGISTRY_SKILL_DESCRIPTION_CACHE_TTL: Duration = Duration::from_secs(60 * 60 * 6);
 
 static REGISTRY_SKILL_DESCRIPTION_CACHE: LazyLock<Cache<String, Option<String>>> =
+    LazyLock::new(|| {
+        Cache::builder()
+            .max_capacity(REGISTRY_SKILL_DESCRIPTION_CACHE_CAPACITY)
+            .time_to_live(REGISTRY_SKILL_DESCRIPTION_CACHE_TTL)
+            .build()
+    });
+
+/// Cache for full SKILL.md content (fetched from GitHub raw content).
+static REGISTRY_SKILL_CONTENT_CACHE: LazyLock<Cache<String, Option<String>>> =
     LazyLock::new(|| {
         Cache::builder()
             .max_capacity(REGISTRY_SKILL_DESCRIPTION_CACHE_CAPACITY)
@@ -91,6 +101,29 @@ pub(super) struct RegistrySearchResponse {
 }
 
 #[derive(Deserialize)]
+pub(super) struct SkillContentQuery {
+    agent_id: String,
+    name: String,
+}
+
+#[derive(Serialize)]
+pub(super) struct SkillContentResponse {
+    name: String,
+    description: String,
+    content: String,
+    file_path: String,
+    base_dir: String,
+    source: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    source_repo: Option<String>,
+}
+
+#[derive(Serialize)]
+pub(super) struct UploadSkillResponse {
+    installed: Vec<String>,
+}
+
+#[derive(Deserialize)]
 pub(super) struct SkillsQuery {
     agent_id: String,
 }
@@ -116,6 +149,21 @@ pub(super) struct RegistrySearchQuery {
 
 fn default_registry_search_limit() -> u32 {
     50
+}
+
+#[derive(Deserialize)]
+pub(super) struct RegistrySkillContentQuery {
+    /// GitHub `owner/repo`.
+    source: String,
+    /// Skill identifier within the repo.
+    skill_id: String,
+}
+
+#[derive(Serialize)]
+pub(super) struct RegistrySkillContentResponse {
+    source: String,
+    skill_id: String,
+    content: Option<String>,
 }
 
 /// List installed skills for an agent.
@@ -222,6 +270,123 @@ pub(super) async fn remove_skill(
     }))
 }
 
+/// Get the full content of an installed skill.
+pub(super) async fn get_skill_content(
+    State(state): State<Arc<ApiState>>,
+    Query(query): Query<SkillContentQuery>,
+) -> Result<Json<SkillContentResponse>, StatusCode> {
+    let configs = state.agent_configs.load();
+    let agent = configs
+        .iter()
+        .find(|a| a.id == query.agent_id)
+        .ok_or(StatusCode::NOT_FOUND)?;
+
+    let instance_dir = state.instance_dir.load();
+    let instance_skills_dir = instance_dir.join("skills");
+    let workspace_skills_dir = agent.workspace.join("skills");
+
+    let skills = crate::skills::SkillSet::load(&instance_skills_dir, &workspace_skills_dir).await;
+
+    let skill = skills.get(&query.name).ok_or(StatusCode::NOT_FOUND)?;
+
+    Ok(Json(SkillContentResponse {
+        name: skill.name.clone(),
+        description: skill.description.clone(),
+        content: skill.content.clone(),
+        file_path: skill.file_path.display().to_string(),
+        base_dir: skill.base_dir.display().to_string(),
+        source: match skill.source {
+            crate::skills::SkillSource::Instance => "instance".to_string(),
+            crate::skills::SkillSource::Workspace => "workspace".to_string(),
+        },
+        source_repo: skill.source_repo.clone(),
+    }))
+}
+
+/// Upload skill files (zip archives or directories) from the user's computer.
+pub(super) async fn upload_skill(
+    State(state): State<Arc<ApiState>>,
+    Query(query): Query<SkillsQuery>,
+    mut multipart: axum::extract::Multipart,
+) -> Result<Json<UploadSkillResponse>, StatusCode> {
+    let configs = state.agent_configs.load();
+    let agent = configs
+        .iter()
+        .find(|a| a.id == query.agent_id)
+        .ok_or(StatusCode::NOT_FOUND)?;
+
+    let target_dir = agent.workspace.join("skills");
+
+    tokio::fs::create_dir_all(&target_dir)
+        .await
+        .map_err(|error| {
+            tracing::warn!(%error, "failed to create skills directory");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+
+    let mut all_installed = Vec::new();
+
+    while let Ok(Some(field)) = multipart.next_field().await {
+        let filename = field
+            .file_name()
+            .map(|n| n.to_string())
+            .unwrap_or_else(|| "upload.zip".to_string());
+
+        let data = field.bytes().await.map_err(|error| {
+            tracing::warn!(%error, "failed to read upload field");
+            StatusCode::BAD_REQUEST
+        })?;
+
+        if data.is_empty() {
+            continue;
+        }
+
+        // Write to a temp file, then install via the existing installer
+        let temp_dir = tempfile::tempdir().map_err(|error| {
+            tracing::warn!(%error, "failed to create temp dir");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+
+        let temp_path = temp_dir.path().join(&filename);
+        let mut file = tokio::fs::File::create(&temp_path).await.map_err(|error| {
+            tracing::warn!(%error, "failed to create temp file");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+        file.write_all(&data).await.map_err(|error| {
+            tracing::warn!(%error, "failed to write temp file");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+        file.sync_all().await.map_err(|error| {
+            tracing::warn!(%error, "failed to sync temp file");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+        drop(file);
+
+        let installed = crate::skills::install_from_file(&temp_path, &target_dir)
+            .await
+            .map_err(|error| {
+                tracing::warn!(%error, filename = %filename, "failed to install uploaded skill");
+                StatusCode::BAD_REQUEST
+            })?;
+
+        all_installed.extend(installed);
+    }
+
+    if !all_installed.is_empty() {
+        state.send_event(ApiEvent::ConfigReloaded);
+    }
+
+    tracing::info!(
+        agent_id = %query.agent_id,
+        installed = ?all_installed,
+        "skills uploaded"
+    );
+
+    Ok(Json(UploadSkillResponse {
+        installed: all_installed,
+    }))
+}
+
 /// Proxy browse requests to skills.sh leaderboard API.
 pub(super) async fn registry_browse(
     Query(query): Query<RegistryBrowseQuery>,
@@ -323,6 +488,37 @@ pub(super) async fn registry_search(
         skills,
         query: body.query,
         count: body.count,
+    }))
+}
+
+/// Fetch the full SKILL.md content for a registry skill from GitHub.
+pub(super) async fn registry_skill_content(
+    Query(query): Query<RegistrySkillContentQuery>,
+) -> Result<Json<RegistrySkillContentResponse>, StatusCode> {
+    if query.source.split('/').count() != 2 || query.skill_id.is_empty() {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+
+    let cache_key = registry_skill_key(&query.source, &query.skill_id);
+
+    // Check cache first
+    if let Some(cached) = REGISTRY_SKILL_CONTENT_CACHE.get(&cache_key) {
+        return Ok(Json(RegistrySkillContentResponse {
+            source: query.source,
+            skill_id: query.skill_id,
+            content: cached,
+        }));
+    }
+
+    let client = reqwest::Client::new();
+    let content = fetch_registry_skill_content(&client, &query.source, &query.skill_id).await;
+
+    REGISTRY_SKILL_CONTENT_CACHE.insert(cache_key, content.clone());
+
+    Ok(Json(RegistrySkillContentResponse {
+        source: query.source,
+        skill_id: query.skill_id,
+        content,
     }))
 }
 
@@ -460,6 +656,60 @@ async fn fetch_registry_skill_description(
 
             if let Some(description) = extract_skill_description(&markdown) {
                 return Some(description);
+            }
+        }
+    }
+
+    None
+}
+
+/// Fetch the full raw SKILL.md content from GitHub for a registry skill.
+///
+/// Uses the same candidate-path probing as description enrichment.
+async fn fetch_registry_skill_content(
+    client: &reqwest::Client,
+    source: &str,
+    skill_id: &str,
+) -> Option<String> {
+    let repo_name = source.split('/').next_back().unwrap_or_default();
+
+    let mut candidate_paths = if repo_name == skill_id {
+        vec![
+            "SKILL.md".to_string(),
+            format!("{skill_id}/SKILL.md"),
+            format!("skills/{skill_id}/SKILL.md"),
+            format!(".claude/skills/{skill_id}/SKILL.md"),
+        ]
+    } else {
+        vec![
+            format!("{skill_id}/SKILL.md"),
+            format!("skills/{skill_id}/SKILL.md"),
+            format!(".claude/skills/{skill_id}/SKILL.md"),
+            "SKILL.md".to_string(),
+        ]
+    };
+
+    for path in candidate_paths.drain(..) {
+        for branch in ["HEAD", "main", "master"] {
+            let url = format!("https://raw.githubusercontent.com/{source}/{branch}/{path}");
+            let response = match client
+                .get(&url)
+                .header(reqwest::header::USER_AGENT, "spacebot-registry-client")
+                .timeout(Duration::from_secs(5))
+                .send()
+                .await
+            {
+                Ok(response) => response,
+                Err(_) => continue,
+            };
+
+            if !response.status().is_success() {
+                continue;
+            }
+
+            match response.text().await {
+                Ok(markdown) if !markdown.trim().is_empty() => return Some(markdown),
+                _ => continue,
             }
         }
     }

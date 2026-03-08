@@ -29,11 +29,38 @@ pub struct DiscoveredWorktree {
     pub branch: String,
 }
 
-/// Scan a directory for git repositories (immediate children only).
+/// Scan a directory for git repositories.
 ///
-/// Returns a list of discovered repos with their metadata. Skips directories
-/// that are not git repos and directories that start with `.`.
+/// First checks if the project root itself is a git repo (single-repo project).
+/// If so, returns it with `relative_path: "."`. Otherwise scans immediate
+/// children for git repos (multi-repo project). Skips hidden directories and
+/// directories that have a `.git` *file* (worktrees of another repo).
 pub async fn discover_repos(project_root: &Path) -> anyhow::Result<Vec<DiscoveredRepo>> {
+    // Check if the project root itself is a git repo (single-repo project).
+    let root_dot_git = project_root.join(".git");
+    if root_dot_git.exists() && root_dot_git.is_dir() {
+        let name = project_root
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("repo")
+            .to_string();
+
+        let remote_url = get_remote_url(project_root).await.unwrap_or_default();
+        let default_branch = get_default_branch(project_root)
+            .await
+            .unwrap_or_else(|| "main".into());
+        let current_branch = get_current_branch(project_root).await;
+
+        return Ok(vec![DiscoveredRepo {
+            name,
+            relative_path: ".".to_string(),
+            remote_url,
+            default_branch,
+            current_branch,
+        }]);
+    }
+
+    // Multi-repo project — scan immediate children.
     let mut repos = Vec::new();
     let mut entries = tokio::fs::read_dir(project_root)
         .await
@@ -84,6 +111,11 @@ pub async fn discover_repos(project_root: &Path) -> anyhow::Result<Vec<Discovere
 
     repos.sort_by(|a, b| a.name.cmp(&b.name));
     Ok(repos)
+}
+
+/// Returns `true` if this is a single-repo project (root itself is the repo).
+pub fn is_single_repo_project(repos: &[DiscoveredRepo]) -> bool {
+    repos.len() == 1 && repos[0].relative_path == "."
 }
 
 /// List existing worktrees for a git repo.

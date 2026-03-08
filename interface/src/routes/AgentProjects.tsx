@@ -163,9 +163,10 @@ function CreateProjectDialog({
 			<DialogContent>
 				<DialogHeader>
 					<DialogTitle>Create Project</DialogTitle>
-					<DialogDescription>
-						Register a project directory. Repos will be auto-discovered.
-					</DialogDescription>
+				<DialogDescription>
+					Register a project directory — either a single repo or a
+					directory containing multiple repos.
+				</DialogDescription>
 				</DialogHeader>
 				<form onSubmit={handleSubmit} className="space-y-4">
 					<div>
@@ -413,15 +414,22 @@ function RepoCard({
 	onDelete: () => void;
 	isDeleting: boolean;
 }) {
+	const isSingleRepo = repo.path === ".";
+
 	return (
 		<div className="rounded-lg border border-app-line bg-app-box p-4 transition-colors hover:border-app-line-hover">
 			<div className="flex items-center justify-between gap-3">
 				<div className="min-w-0 flex-1">
-					<h4 className="truncate font-plex text-sm font-medium text-ink">
-						{repo.name}
-					</h4>
+					<div className="flex items-center gap-2">
+						<h4 className="truncate font-plex text-sm font-medium text-ink">
+							{repo.name}
+						</h4>
+						{isSingleRepo && (
+							<Badge variant="outline" size="sm">root</Badge>
+						)}
+					</div>
 					<p className="mt-0.5 truncate font-mono text-[11px] text-ink-faint">
-						{repo.path}
+						{isSingleRepo ? "project root" : repo.path}
 					</p>
 				</div>
 				<div className="flex shrink-0 items-center gap-1.5">

@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import { useQuery, useMutation, useQueryClient, useInfiniteQuery } from "@tanstack/react-query";
 import { api, type SkillInfo, type RegistrySkill, type RegistryView } from "@/api/client";
-import { Button, Badge } from "@/ui";
+import { Button, Badge, Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } from "@/ui";
 import { clsx } from "clsx";
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
 import {
@@ -14,6 +14,7 @@ import {
 	faFire,
 	faTrophy,
 	faBolt,
+	faUpload,
 } from "@fortawesome/free-solid-svg-icons";
 
 interface AgentSkillsProps {
@@ -42,17 +43,211 @@ function installSpec(skill: RegistrySkill): string {
 	return `${skill.source}/${skill.skillId}`;
 }
 
+/** Modal for viewing an installed skill's full SKILL.md content. */
+function InstalledSkillDetailModal({
+	agentId,
+	skill,
+	open,
+	onOpenChange,
+}: {
+	agentId: string;
+	skill: SkillInfo | null;
+	open: boolean;
+	onOpenChange: (open: boolean) => void;
+}) {
+	const { data, isLoading } = useQuery({
+		queryKey: ["skill-content", agentId, skill?.name],
+		queryFn: () => api.getSkillContent(agentId, skill!.name),
+		enabled: open && !!skill,
+	});
+
+	return (
+		<Dialog open={open} onOpenChange={onOpenChange}>
+			<DialogContent className="max-w-2xl max-h-[80vh] overflow-y-auto">
+				<DialogHeader>
+					<div className="flex items-center gap-2">
+						<DialogTitle>{skill?.name ?? "Skill"}</DialogTitle>
+						{skill && (
+							<Badge variant={skill.source === "instance" ? "accent" : "green"} size="sm">
+								{skill.source}
+							</Badge>
+						)}
+					</div>
+					<DialogDescription>
+						{skill?.description || "No description provided"}
+					</DialogDescription>
+				</DialogHeader>
+
+				{isLoading && (
+					<div className="flex items-center justify-center py-8">
+						<FontAwesomeIcon icon={faSpinner} className="animate-spin text-ink-faint" />
+						<span className="ml-2 text-sm text-ink-faint">Loading skill content...</span>
+					</div>
+				)}
+
+				{data && (
+					<div className="space-y-4">
+						{data.source_repo && (
+							<div className="flex items-center gap-2 text-xs text-ink-dull">
+								<span className="font-medium text-ink-faint">Source:</span>
+								<a
+									href={`https://github.com/${data.source_repo}`}
+									target="_blank"
+									rel="noopener noreferrer"
+									className="font-mono transition-colors hover:text-accent"
+								>
+									{data.source_repo}
+									<FontAwesomeIcon icon={faExternalLinkAlt} className="ml-1 text-[10px]" />
+								</a>
+							</div>
+						)}
+						<div className="flex items-center gap-2 text-xs text-ink-dull">
+							<span className="font-medium text-ink-faint">Path:</span>
+							<span className="font-mono break-all">{data.base_dir}</span>
+						</div>
+						<SkillContentBlock content={data.content} />
+					</div>
+				)}
+			</DialogContent>
+		</Dialog>
+	);
+}
+
+/** Modal for viewing a registry (non-installed) skill's full SKILL.md content. */
+function RegistrySkillDetailModal({
+	skill,
+	open,
+	onOpenChange,
+	onInstall,
+	isInstalled,
+	isInstalling,
+}: {
+	skill: RegistrySkill | null;
+	open: boolean;
+	onOpenChange: (open: boolean) => void;
+	onInstall: () => void;
+	isInstalled: boolean;
+	isInstalling: boolean;
+}) {
+	const { data, isLoading } = useQuery({
+		queryKey: ["registry-skill-content", skill?.source, skill?.skillId],
+		queryFn: () => api.registrySkillContent(skill!.source, skill!.skillId),
+		enabled: open && !!skill,
+	});
+
+	return (
+		<Dialog open={open} onOpenChange={onOpenChange}>
+			<DialogContent className="max-w-2xl max-h-[80vh] overflow-y-auto">
+				<DialogHeader>
+					<div className="flex items-center gap-2">
+						<DialogTitle>{skill?.name ?? "Skill"}</DialogTitle>
+						{skill && !isInstalled && (
+							<Button
+								variant="default"
+								size="sm"
+								onClick={(e) => {
+									e.stopPropagation();
+									onInstall();
+								}}
+								disabled={isInstalling}
+								className="ml-auto"
+							>
+								{isInstalling ? (
+									<>
+										<FontAwesomeIcon icon={faSpinner} className="animate-spin" />
+										Installing...
+									</>
+								) : (
+									<>
+										<FontAwesomeIcon icon={faDownload} />
+										Install
+									</>
+								)}
+							</Button>
+						)}
+						{isInstalled && (
+							<Badge variant="green" size="sm" className="ml-auto">
+								Installed
+							</Badge>
+						)}
+					</div>
+					<DialogDescription>
+						{skill?.description || "No description provided"}
+					</DialogDescription>
+				</DialogHeader>
+
+				{skill && (
+					<div className="flex items-center gap-2 text-xs text-ink-dull">
+						<span className="font-medium text-ink-faint">Source:</span>
+						<a
+							href={`https://github.com/${skill.source}`}
+							target="_blank"
+							rel="noopener noreferrer"
+							className="font-mono transition-colors hover:text-accent"
+						>
+							{skill.source}
+							<FontAwesomeIcon icon={faExternalLinkAlt} className="ml-1 text-[10px]" />
+						</a>
+						{skill.installs > 0 && (
+							<>
+								<span className="text-ink-dull/40">|</span>
+								<span>{formatInstalls(skill.installs)} installs</span>
+							</>
+						)}
+					</div>
+				)}
+
+				{isLoading && (
+					<div className="flex items-center justify-center py-8">
+						<FontAwesomeIcon icon={faSpinner} className="animate-spin text-ink-faint" />
+						<span className="ml-2 text-sm text-ink-faint">Loading skill content...</span>
+					</div>
+				)}
+
+				{data && !data.content && !isLoading && (
+					<div className="rounded-md border border-app-line bg-app-darkBox p-6 text-center">
+						<p className="text-sm text-ink-faint">
+							Could not fetch SKILL.md from GitHub.
+						</p>
+					</div>
+				)}
+
+				{data?.content && <SkillContentBlock content={data.content} />}
+			</DialogContent>
+		</Dialog>
+	);
+}
+
+/** Shared component that renders a SKILL.md content block. */
+function SkillContentBlock({ content }: { content: string }) {
+	return (
+		<div className="rounded-md border border-app-line bg-app-darkBox">
+			<div className="border-b border-app-line px-4 py-2">
+				<span className="font-mono text-xs font-medium text-ink-faint">SKILL.md</span>
+			</div>
+			<pre className="overflow-x-auto whitespace-pre-wrap p-4 font-mono text-xs leading-relaxed text-ink-dull">
+				{content}
+			</pre>
+		</div>
+	);
+}
+
 function InstalledSkill({
 	skill,
+	onClick,
 	onRemove,
 	isRemoving,
 }: {
 	skill: SkillInfo;
+	onClick: () => void;
 	onRemove: () => void;
 	isRemoving: boolean;
 }) {
 	return (
-		<div className="flex flex-col rounded-lg border border-app-line bg-app-box p-4 transition-colors hover:border-app-line-hover">
+		<div
+			className="flex cursor-pointer flex-col rounded-lg border border-app-line bg-app-box p-4 transition-colors hover:border-app-line-hover"
+			onClick={onClick}
+		>
 			<div className="flex items-center justify-between gap-3">
 				<div className="min-w-0 flex-1">
 					<div className="flex min-w-0 items-center gap-2">
@@ -67,7 +262,10 @@ function InstalledSkill({
 				<Button
 					variant="outline"
 					size="icon"
-					onClick={onRemove}
+					onClick={(e) => {
+						e.stopPropagation();
+						onRemove();
+					}}
 					disabled={isRemoving}
 					className="h-6 w-6 flex-shrink-0"
 				>
@@ -90,6 +288,7 @@ function InstalledSkill({
 function RegistrySkillCard({
 	skill,
 	isInstalled,
+	onClick,
 	onInstall,
 	onRemove,
 	isInstalling,
@@ -97,13 +296,17 @@ function RegistrySkillCard({
 }: {
 	skill: RegistrySkill;
 	isInstalled: boolean;
+	onClick: () => void;
 	onInstall: () => void;
 	onRemove: () => void;
 	isInstalling: boolean;
 	isRemoving: boolean;
 }) {
 	return (
-		<div className="flex flex-col rounded-lg border border-app-line bg-app-box p-4 transition-colors hover:border-app-line-hover">
+		<div
+			className="flex cursor-pointer flex-col rounded-lg border border-app-line bg-app-box p-4 transition-colors hover:border-app-line-hover"
+			onClick={onClick}
+		>
 			<div className="flex items-center gap-2">
 				<h3 className="truncate font-plex text-sm font-medium text-ink">
 					{skill.name}
@@ -120,7 +323,8 @@ function RegistrySkillCard({
 				<Button
 					variant="outline"
 					size="icon"
-					onClick={() => {
+					onClick={(e) => {
+						e.stopPropagation();
 						if (isInstalled) {
 							onRemove();
 						} else {
@@ -168,6 +372,15 @@ export function AgentSkills({ agentId }: AgentSkillsProps) {
 	const [activeTab, setActiveTab] = useState<"installed" | "browse">("browse");
 	const [registryView, setRegistryView] = useState<RegistryView>("all-time");
 	const scrollRef = useRef<HTMLDivElement>(null);
+	const fileInputRef = useRef<HTMLInputElement>(null);
+
+	// Installed skill detail modal state
+	const [selectedSkill, setSelectedSkill] = useState<SkillInfo | null>(null);
+	const [detailModalOpen, setDetailModalOpen] = useState(false);
+
+	// Registry skill detail modal state
+	const [selectedRegistrySkill, setSelectedRegistrySkill] = useState<RegistrySkill | null>(null);
+	const [registryDetailOpen, setRegistryDetailOpen] = useState(false);
 
 	// Debounce search input
 	useEffect(() => {
@@ -265,6 +478,24 @@ export function AgentSkills({ agentId }: AgentSkillsProps) {
 		},
 	});
 
+	const uploadMutation = useMutation({
+		mutationFn: (files: File[]) => api.uploadSkillFiles(agentId, files),
+		onSuccess: () => {
+			queryClient.invalidateQueries({ queryKey: ["skills", agentId] });
+			if (fileInputRef.current) {
+				fileInputRef.current.value = "";
+			}
+		},
+	});
+
+	const handleFileUpload = useCallback(
+		(files: FileList | null) => {
+			if (!files || files.length === 0) return;
+			uploadMutation.mutate(Array.from(files));
+		},
+		[uploadMutation],
+	);
+
 	const installedSkills = skillsData?.skills ?? [];
 	const installedKeys = new Map(
 		installedSkills.map((s) => [
@@ -285,6 +516,57 @@ export function AgentSkills({ agentId }: AgentSkillsProps) {
 
 	return (
 		<div className="flex h-full flex-col">
+			{/* Installed skill detail modal */}
+			<InstalledSkillDetailModal
+				agentId={agentId}
+				skill={selectedSkill}
+				open={detailModalOpen}
+				onOpenChange={(open) => {
+					setDetailModalOpen(open);
+					if (!open) setSelectedSkill(null);
+				}}
+			/>
+
+			{/* Registry skill detail modal */}
+			<RegistrySkillDetailModal
+				skill={selectedRegistrySkill}
+				open={registryDetailOpen}
+				onOpenChange={(open) => {
+					setRegistryDetailOpen(open);
+					if (!open) setSelectedRegistrySkill(null);
+				}}
+				onInstall={() => {
+					if (selectedRegistrySkill) {
+						installMutation.mutate(installSpec(selectedRegistrySkill));
+					}
+				}}
+				isInstalled={
+					selectedRegistrySkill
+						? Boolean(
+								installedKeys.get(
+									`${selectedRegistrySkill.source}/${selectedRegistrySkill.name}`.toLowerCase(),
+								) ?? installedKeys.get(selectedRegistrySkill.name.toLowerCase()),
+							)
+						: false
+				}
+				isInstalling={
+					selectedRegistrySkill
+						? installMutation.isPending &&
+							installMutation.variables === installSpec(selectedRegistrySkill)
+						: false
+				}
+			/>
+
+			{/* Hidden file input for upload */}
+			<input
+				ref={fileInputRef}
+				type="file"
+				accept=".zip,.skill"
+				multiple
+				className="hidden"
+				onChange={(e) => handleFileUpload(e.target.files)}
+			/>
+
 			{/* Header with tabs */}
 			<div className="border-b border-app-line">
 				<div className="flex items-center gap-1 px-6 py-3">
@@ -477,6 +759,10 @@ export function AgentSkills({ agentId }: AgentSkillsProps) {
 											key={`${skill.source}/${skill.skillId}`}
 											skill={skill}
 											isInstalled={isInstalled}
+											onClick={() => {
+												setSelectedRegistrySkill(skill);
+												setRegistryDetailOpen(true);
+											}}
 											onInstall={() =>
 												installMutation.mutate(spec)
 											}
@@ -519,10 +805,42 @@ export function AgentSkills({ agentId }: AgentSkillsProps) {
 								<h2 className="text-sm font-medium text-ink-dull">
 									Installed Skills
 								</h2>
-								<span className="text-xs text-ink-faint">
-									{installedSkills.length} skills
-								</span>
+								<div className="flex items-center gap-3">
+									<span className="text-xs text-ink-faint">
+										{installedSkills.length} skills
+									</span>
+									<Button
+										variant="outline"
+										size="default"
+										onClick={() => fileInputRef.current?.click()}
+										disabled={uploadMutation.isPending}
+									>
+										{uploadMutation.isPending ? (
+											<>
+												<FontAwesomeIcon icon={faSpinner} className="animate-spin" />
+												Uploading...
+											</>
+										) : (
+											<>
+												<FontAwesomeIcon icon={faUpload} />
+												Upload Skills
+											</>
+										)}
+									</Button>
+								</div>
 							</div>
+
+							{uploadMutation.isError && (
+								<p className="text-xs text-red-400">
+									Failed to upload skill. Make sure the file is a valid .zip or .skill archive.
+								</p>
+							)}
+							{uploadMutation.isSuccess && (
+								<p className="text-xs text-green-400">
+									Uploaded {uploadMutation.data.installed.length} skill(s):{" "}
+									{uploadMutation.data.installed.join(", ")}
+								</p>
+							)}
 
 							{isLoading && (
 								<div className="rounded-lg border border-app-line bg-app-box p-8 text-center">
@@ -558,6 +876,10 @@ export function AgentSkills({ agentId }: AgentSkillsProps) {
 									<InstalledSkill
 										key={skill.name}
 										skill={skill}
+										onClick={() => {
+											setSelectedSkill(skill);
+											setDetailModalOpen(true);
+										}}
 										onRemove={() => removeMutation.mutate(skill.name)}
 										isRemoving={
 											removeMutation.isPending &&

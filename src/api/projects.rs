@@ -191,6 +191,8 @@ async fn discover_and_register_worktrees(
         }
     };
 
+    let is_single_repo = repos.len() == 1 && repos[0].path == ".";
+
     for repo in &repos {
         let repo_abs_path = root.join(&repo.path);
         if !repo_abs_path.is_dir() {
@@ -199,24 +201,41 @@ async fn discover_and_register_worktrees(
         match crate::projects::git::list_worktrees(&repo_abs_path).await {
             Ok(discovered) => {
                 for worktree in discovered {
-                    // Compute relative path from project root.
-                    let relative_path = worktree
-                        .path
-                        .strip_prefix(root)
-                        .map(|p| p.to_string_lossy().to_string())
-                        .unwrap_or_else(|_| {
-                            worktree
-                                .path
-                                .file_name()
-                                .map(|n| n.to_string_lossy().to_string())
-                                .unwrap_or_default()
-                        });
+                    // For single-repo projects, worktrees live in the parent
+                    // directory. Compute the relative path accordingly.
+                    let (name, relative_path) = if is_single_repo {
+                        let name = worktree
+                            .path
+                            .file_name()
+                            .map(|n| n.to_string_lossy().to_string())
+                            .unwrap_or_default();
+                        // Store as relative to the parent directory (e.g. "../feat-branch").
+                        let parent = root.parent();
+                        let rel = parent
+                            .and_then(|p| worktree.path.strip_prefix(p).ok())
+                            .map(|p| format!("../{}", p.to_string_lossy()))
+                            .unwrap_or_else(|| worktree.path.to_string_lossy().to_string());
+                        (name, rel)
+                    } else {
+                        let relative_path = worktree
+                            .path
+                            .strip_prefix(root)
+                            .map(|p| p.to_string_lossy().to_string())
+                            .unwrap_or_else(|_| {
+                                worktree
+                                    .path
+                                    .file_name()
+                                    .map(|n| n.to_string_lossy().to_string())
+                                    .unwrap_or_default()
+                            });
 
-                    let name = worktree
-                        .path
-                        .file_name()
-                        .map(|n| n.to_string_lossy().to_string())
-                        .unwrap_or_default();
+                        let name = worktree
+                            .path
+                            .file_name()
+                            .map(|n| n.to_string_lossy().to_string())
+                            .unwrap_or_default();
+                        (name, relative_path)
+                    };
 
                     // Skip if already registered.
                     if store
@@ -683,13 +702,26 @@ pub(super) async fn create_worktree(
 
     let root = std::path::PathBuf::from(&project.root_path);
     let repo_abs_path = root.join(&repo.path);
+    let is_single_repo = repo.path == ".";
 
     // Determine worktree name and path — sanitize to prevent traversal.
     let worktree_name = request
         .worktree_name
         .unwrap_or_else(|| request.branch.replace('/', "-"));
     let worktree_name = sanitize_segment(&worktree_name)?;
-    let worktree_abs_path = root.join(&worktree_name);
+
+    // For single-repo projects, place worktrees in the parent directory
+    // (as siblings of the repo). For multi-repo projects, place them
+    // inside the project root.
+    let (worktree_abs_path, worktree_db_path) = if is_single_repo {
+        let parent = root.parent().ok_or_else(|| {
+            tracing::error!("single-repo project root has no parent directory");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+        (parent.join(&worktree_name), format!("../{worktree_name}"))
+    } else {
+        (root.join(&worktree_name), worktree_name.clone())
+    };
 
     // Create the git worktree.
     crate::projects::git::create_worktree(
@@ -710,7 +742,7 @@ pub(super) async fn create_worktree(
             project_id,
             repo_id: request.repo_id,
             name: worktree_name.clone(),
-            path: worktree_name,
+            path: worktree_db_path,
             branch: request.branch,
             created_by: "user".into(),
         })
@@ -768,6 +800,7 @@ pub(super) async fn delete_worktree(
     // Run `git worktree remove`.
     let root = std::path::PathBuf::from(&project.root_path);
     let repo_abs_path = root.join(&repo.path);
+    // Worktree paths may be relative with `../` for single-repo projects.
     let worktree_abs_path = root.join(&worktree.path);
 
     // Only delete the DB record if the git removal succeeds (or the directory
