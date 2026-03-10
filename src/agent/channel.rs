@@ -894,7 +894,7 @@ impl Channel {
         }
         let supported_source = matches!(
             message.source.as_str(),
-            "telegram" | "discord" | "slack" | "twitch"
+            "telegram" | "discord" | "slack" | "twitch" | "signal"
         );
         if !supported_source {
             return Ok(false);
@@ -1273,11 +1273,13 @@ impl Channel {
             self.conversation_id = Some(first.conversation_id.clone());
         }
 
+        // Track source adapter from the first non-system message
+        // Prefer message.adapter (full adapter string like "signal:work") over message.source
         if self.source_adapter.is_none()
             && let Some(first) = messages.first()
             && first.source != "system"
         {
-            self.source_adapter = Some(first.source.clone());
+            self.source_adapter = first.adapter.clone().or_else(|| Some(first.source.clone()));
         }
 
         // Capture conversation context from the first message
@@ -1479,6 +1481,13 @@ impl Channel {
             .build_system_prompt_with_coalesce(message_count, elapsed_secs, unique_sender_count)
             .await?;
 
+        // Extract adapter from messages (prefer explicit message.adapter, fall back to stored source_adapter)
+        // This preserves per-message adapter for Signal named instances (e.g., "signal:work")
+        let batch_adapter = messages
+            .iter()
+            .find_map(|m| m.adapter.as_deref())
+            .or(self.source_adapter.as_deref());
+
         {
             let mut reply_target = self.state.reply_target_message_id.write().await;
             *reply_target = messages.iter().rev().find_map(extract_message_id);
@@ -1492,6 +1501,7 @@ impl Channel {
                 &conversation_id,
                 attachment_parts,
                 false, // not a retrigger
+                batch_adapter,
             )
             .await?;
 
@@ -1623,8 +1633,13 @@ impl Channel {
             self.conversation_id = Some(message.conversation_id.clone());
         }
 
+        // Track source adapter from non-system messages
+        // Prefer message.adapter (full adapter string like "signal:work") over message.source
         if self.source_adapter.is_none() && message.source != "system" {
-            self.source_adapter = Some(message.source.clone());
+            self.source_adapter = message
+                .adapter
+                .clone()
+                .or_else(|| Some(message.source.clone()));
         }
 
         let (raw_text, attachments) = match &message.content {
@@ -1814,6 +1829,10 @@ impl Channel {
             Vec::new()
         };
 
+        let adapter = message
+            .adapter
+            .as_deref()
+            .or_else(|| self.current_adapter());
         let (result, skip_flag, replied_flag, retrigger_reply_preserved) = self
             .run_agent_turn(
                 &user_text,
@@ -1821,6 +1840,7 @@ impl Channel {
                 &message.conversation_id,
                 attachment_content,
                 is_retrigger,
+                adapter,
             )
             .await?;
 
@@ -1836,7 +1856,7 @@ impl Channel {
             && !replied_flag.load(std::sync::atomic::Ordering::Relaxed)
             && matches!(
                 message.source.as_str(),
-                "discord" | "telegram" | "slack" | "twitch"
+                "discord" | "telegram" | "slack" | "twitch" | "signal"
             )
         {
             self.send_builtin_text(
@@ -2242,6 +2262,7 @@ impl Channel {
         conversation_id: &str,
         attachment_content: Vec<UserContent>,
         is_retrigger: bool,
+        adapter: Option<&str>,
     ) -> Result<(
         std::result::Result<String, rig::completion::PromptError>,
         crate::tools::SkipFlag,
@@ -2269,6 +2290,7 @@ impl Channel {
             self.deps.cron_tool.clone(),
             send_agent_message_tool,
             allow_direct_reply,
+            adapter.map(|s| s.to_string()),
         )
         .await
         {
@@ -2653,6 +2675,12 @@ impl Channel {
                     .channel_errors_total
                     .with_label_values(&[metrics_agent_id, metrics_channel_type, "llm_error"])
                     .inc();
+                // Send error to user so they know something went wrong
+                let error_msg = format!("I encountered an error: {}", error);
+                self.response_tx
+                    .send(OutboundResponse::Text(error_msg))
+                    .await
+                    .ok();
                 tracing::error!(channel_id = %self.id, %error, "channel LLM call failed");
             }
         }
