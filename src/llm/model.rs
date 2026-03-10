@@ -1372,11 +1372,18 @@ fn convert_messages_to_openai(messages: &OneOrMany<Message>) -> Vec<serde_json::
                             text_parts.push(t.text.clone());
                         }
                         AssistantContent::ToolCall(tc) => {
-                            // OpenAI expects arguments as a JSON string
+                            // OpenAI expects arguments as a JSON string.
+                            // Prefer call_id (set when replaying Responses-API tool calls
+                            // through chat-completions) to keep assistant and tool IDs aligned.
+                            let preferred_id = tc
+                                .call_id
+                                .as_deref()
+                                .filter(|c| !c.is_empty())
+                                .unwrap_or(&tc.id);
                             let args_string = serde_json::to_string(&tc.function.arguments)
                                 .unwrap_or_else(|_| "{}".to_string());
                             tool_calls.push(serde_json::json!({
-                                "id": tc.id,
+                                "id": preferred_id,
                                 "type": "function",
                                 "function": {
                                     "name": tc.function.name,

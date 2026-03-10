@@ -37,7 +37,7 @@ pub struct Branch {
     pub memory_persistence_contract: Option<Arc<MemoryPersistenceContractState>>,
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct BranchExecutionConfig {
     pub max_turns: usize,
     pub memory_persistence_contract: Option<Arc<MemoryPersistenceContractState>>,
@@ -132,8 +132,14 @@ impl Branch {
             {
                 Ok(response) => break response,
                 Err(rig::completion::PromptError::MaxTurnsError { .. }) => {
+                    self.hook.set_completion_contract_request_active(false);
                     if enforce_memory_contract {
-                        self.hook.set_completion_contract_request_active(false);
+                        tracing::warn!(
+                            branch_id = %self.id,
+                            "memory persistence branch exceeded turn limit without completing contract"
+                        );
+                        break "Memory persistence branch exceeded turn limit without completing the memory persistence contract."
+                            .to_string();
                     }
                     let partial = crate::agent::extract_last_assistant_text(&self.history)
                         .unwrap_or_else(|| {
@@ -147,6 +153,12 @@ impl Branch {
                         && SpacebotHook::is_memory_persistence_contract_reason(&reason) =>
                 {
                     self.hook.set_completion_contract_request_active(false);
+                    if matches!(
+                        self.history.last(),
+                        Some(rig::message::Message::Assistant { .. })
+                    ) {
+                        self.history.pop();
+                    }
                     memory_contract_retries += 1;
                     if memory_contract_retries > MAX_MEMORY_CONTRACT_RETRIES {
                         tracing::warn!(

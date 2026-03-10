@@ -299,19 +299,53 @@ impl Tool for MemorySaveTool {
             }
         }
 
-        // Generate and store embedding (async to avoid blocking the tokio runtime)
-        let embedding = self
+        // Generate and store embedding. On failure, compensate by deleting the
+        // SQLite row (and any associations already written) so there is no orphan.
+        let embedding = match self
             .memory_search
             .embedding_model_arc()
             .embed_one(&args.content)
             .await
-            .map_err(|e| MemorySaveError(format!("Failed to generate embedding: {e}")))?;
+        {
+            Ok(emb) => emb,
+            Err(embed_err) => {
+                if let Err(del_err) = self.memory_search.store().delete(&memory.id).await {
+                    tracing::error!(
+                        memory_id = %memory.id,
+                        %del_err,
+                        "compensating delete failed after embedding generation error"
+                    );
+                }
+                return Err(MemorySaveError(format!(
+                    "Failed to generate embedding: {embed_err}"
+                )));
+            }
+        };
 
-        self.memory_search
+        match self
+            .memory_search
             .embedding_table()
             .store(&memory.id, &args.content, &embedding)
             .await
-            .map_err(|e| MemorySaveError(format!("Failed to store embedding: {e}")))?;
+        {
+            Ok(()) => {
+                if let Some(contract_state) = &self.contract_state {
+                    contract_state.record_saved_memory_id(memory.id.clone());
+                }
+            }
+            Err(embed_err) => {
+                if let Err(del_err) = self.memory_search.store().delete(&memory.id).await {
+                    tracing::error!(
+                        memory_id = %memory.id,
+                        %del_err,
+                        "compensating delete failed after embedding store error"
+                    );
+                }
+                return Err(MemorySaveError(format!(
+                    "Failed to store embedding: {embed_err}"
+                )));
+            }
+        }
 
         // Ensure the FTS index exists so full_text_search queries work.
         // Safe to call repeatedly — no-ops if the index already exists.
@@ -361,10 +395,6 @@ impl Tool for MemorySaveTool {
                 .memory_updates_total
                 .with_label_values(&[agent_label, "save"])
                 .inc();
-        }
-
-        if let Some(contract_state) = &self.contract_state {
-            contract_state.record_saved_memory_id(memory.id.clone());
         }
 
         Ok(MemorySaveOutput {
