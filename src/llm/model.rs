@@ -112,6 +112,11 @@ impl SpacebotModel {
                 .get_openai_chatgpt_provider()
                 .await
                 .map_err(|error| CompletionError::ProviderError(error.to_string())),
+            "github-copilot" => self
+                .llm_manager
+                .get_github_copilot_provider()
+                .await
+                .map_err(|error| CompletionError::ProviderError(error.to_string())),
             _ => self
                 .llm_manager
                 .get_provider(provider_id)

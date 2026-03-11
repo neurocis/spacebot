@@ -176,6 +176,7 @@ pub(super) struct TomlLlmConfigFields {
     pub(super) minimax_cn_key: Option<String>,
     pub(super) moonshot_key: Option<String>,
     pub(super) zai_coding_plan_key: Option<String>,
+    pub(super) github_copilot_key: Option<String>,
     #[serde(default)]
     pub(super) providers: HashMap<String, TomlProviderConfig>,
     #[serde(default)]
@@ -206,6 +207,7 @@ pub(super) struct TomlLlmConfig {
     pub(super) minimax_cn_key: Option<String>,
     pub(super) moonshot_key: Option<String>,
     pub(super) zai_coding_plan_key: Option<String>,
+    pub(super) github_copilot_key: Option<String>,
     pub(super) providers: HashMap<String, TomlProviderConfig>,
 }
 
@@ -261,6 +263,7 @@ impl<'de> Deserialize<'de> for TomlLlmConfig {
             minimax_cn_key: fields.minimax_cn_key,
             moonshot_key: fields.moonshot_key,
             zai_coding_plan_key: fields.zai_coding_plan_key,
+            github_copilot_key: fields.github_copilot_key,
             providers: fields.providers,
         })
     }

@@ -931,6 +931,7 @@ export interface ProviderStatus {
 	minimax_cn: boolean;
 	moonshot: boolean;
 	zai_coding_plan: boolean;
+	github_copilot: boolean;
 }
 
 export interface ProvidersResponse {

@@ -243,6 +243,14 @@ const PROVIDERS = [
 		defaultModel: "moonshot/kimi-k2.5",
 	},
 	{
+		id: "github-copilot",
+		name: "GitHub Copilot",
+		description: "GitHub Copilot API (uses GitHub PAT for token exchange)",
+		placeholder: "ghp_... or gh auth token",
+		envVar: "GITHUB_COPILOT_API_KEY",
+		defaultModel: "github-copilot/claude-sonnet-4",
+	},
+	{
 		id: "ollama",
 		name: "Ollama",
 		description: "Local or remote Ollama API endpoint",
