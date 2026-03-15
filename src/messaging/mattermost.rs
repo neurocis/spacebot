@@ -134,7 +134,7 @@ impl MattermostAdapter {
         url.set_scheme(match self.base_url.scheme() {
             "https" => "wss",
             "http" => "ws",
-            other => other,
+            other => unreachable!("unsupported URL scheme: {other}"),
         })
         .expect("scheme substitution is valid");
         url.path_segments_mut()

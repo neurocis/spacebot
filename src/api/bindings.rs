@@ -713,33 +713,29 @@ pub(super) async fn update_binding(
             None => table.get("adapter").is_none(),
         };
         let matches_guild = match &request.original_guild_id {
-            Some(gid) => table
+            Some(guild_id) => table
                 .get("guild_id")
                 .and_then(|v| v.as_str())
-                .is_some_and(|v| v == gid),
+                .is_some_and(|v| v == guild_id),
             None => table.get("guild_id").is_none(),
         };
         let matches_workspace = match &request.original_workspace_id {
-            Some(wid) => table
+            Some(workspace_id) => table
                 .get("workspace_id")
                 .and_then(|v| v.as_str())
-                .is_some_and(|v| v == wid),
+                .is_some_and(|v| v == workspace_id),
             None => table.get("workspace_id").is_none(),
         };
         let matches_chat = match &request.original_chat_id {
-            Some(cid) => table
+            Some(chat_id) => table
                 .get("chat_id")
                 .and_then(|v| v.as_str())
-                .is_some_and(|v| v == cid),
+                .is_some_and(|v| v == chat_id),
             None => table.get("chat_id").is_none(),
         };
-        let matches_team = match &request.original_team_id {
-            Some(tid) => table
-                .get("team_id")
-                .and_then(|v| v.as_str())
-                .is_some_and(|v| v == tid),
-            None => table.get("team_id").is_none(),
-        };
+        let req_team_id = request.original_team_id.as_deref().map(str::trim).filter(|s| !s.is_empty());
+        let toml_team_id = table.get("team_id").and_then(|v| v.as_str()).map(str::trim).filter(|s| !s.is_empty());
+        let matches_team = req_team_id == toml_team_id;
         if matches_agent
             && matches_channel
             && matches_adapter
@@ -797,9 +793,7 @@ pub(super) async fn update_binding(
     {
         binding["chat_id"] = toml_edit::value(chat_id);
     }
-    if let Some(ref team_id) = request.team_id
-        && !team_id.is_empty()
-    {
+    if let Some(team_id) = request.team_id.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
         binding["team_id"] = toml_edit::value(team_id);
     }
 
@@ -921,33 +915,29 @@ pub(super) async fn delete_binding(
             None => table.get("adapter").is_none(),
         };
         let matches_guild = match &request.guild_id {
-            Some(gid) => table
+            Some(guild_id) => table
                 .get("guild_id")
                 .and_then(|v: &toml_edit::Item| v.as_str())
-                .is_some_and(|v| v == gid),
+                .is_some_and(|v| v == guild_id),
             None => table.get("guild_id").is_none(),
         };
         let matches_workspace = match &request.workspace_id {
-            Some(wid) => table
+            Some(workspace_id) => table
                 .get("workspace_id")
                 .and_then(|v: &toml_edit::Item| v.as_str())
-                .is_some_and(|v| v == wid),
+                .is_some_and(|v| v == workspace_id),
             None => table.get("workspace_id").is_none(),
         };
         let matches_chat = match &request.chat_id {
-            Some(cid) => table
+            Some(chat_id) => table
                 .get("chat_id")
                 .and_then(|v: &toml_edit::Item| v.as_str())
-                .is_some_and(|v| v == cid),
+                .is_some_and(|v| v == chat_id),
             None => table.get("chat_id").is_none(),
         };
-        let matches_team = match &request.team_id {
-            Some(tid) => table
-                .get("team_id")
-                .and_then(|v: &toml_edit::Item| v.as_str())
-                .is_some_and(|v| v == tid),
-            None => table.get("team_id").is_none(),
-        };
+        let req_team_id = request.team_id.as_deref().map(str::trim).filter(|s| !s.is_empty());
+        let toml_team_id = table.get("team_id").and_then(|v: &toml_edit::Item| v.as_str()).map(str::trim).filter(|s| !s.is_empty());
+        let matches_team = req_team_id == toml_team_id;
         if matches_agent
             && matches_channel
             && matches_adapter
